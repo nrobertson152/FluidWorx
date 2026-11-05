@@ -8,6 +8,10 @@ This is for logic first. **What switches, in what order and why is meant to be r
 good enough to check a design by hand (does the coil pull in, what does the supply carry, does the fuse hold), and
 no better. See [What it doesn't do](#what-it-doesnt-do).
 
+![A PLC running a hydraulic cylinder, seen from its control sheet](images/electrical.png)
+
+Try it: *File ▸ Open example ▸ PLC running a cylinder*, press Space, and hold the mouse down on **S0** on the Control sheet.
+
 ## How the two sides are tied together
 
 **The same tag means the same device.** That is how a drawing is already read, so most drawings need nothing more.

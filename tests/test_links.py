@@ -386,6 +386,25 @@ def test_a_switch_that_only_names_a_cylinder_is_told_it_needs_a_place():
     assert any("needs to know where" in i.text for i in c.issues) and not c.links
 
 
+def test_parts_with_no_tag_are_not_the_same_device():
+    """Both would otherwise go by the name of their symbol."""
+    d = Drawing()
+    d.add("el.coil.iec")
+    d.add("el.coil.iec")
+    d.add("el.contact.no.iec")
+    c = d.build()
+    assert not c.links and not any("coils are tagged" in i.text for i in c.issues)
+
+
+def test_a_valve_with_no_tag_says_so():
+    d = Drawing()
+    params = default_valve_params("hyd", "4/3")
+    params["left"], params["right"] = ["solenoid", "spring"], ["solenoid", "spring"]
+    d.add("fl.hyd.dcv", params=params)
+    d.add("el.coil.valve", "Y1a")
+    assert any("no tag to find a coil by" in i.text for i in d.build().issues)
+
+
 def test_two_coils_with_one_tag_are_reported():
     d = Drawing()
     d.add("el.coil.iec", "K1")

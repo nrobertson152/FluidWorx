@@ -82,6 +82,11 @@ def _fold(tag) -> str:
     return (tag or "").strip().casefold()
 
 
+def _tag(part) -> str:
+    """The tag it was given. Only a tag someone wrote ties anything: two parts with none aren't the same device."""
+    return _fold(part.comp.designator)
+
+
 def _prop(comp, name) -> str:
     """A property, whatever case it was typed in."""
     wanted = name.casefold()
@@ -99,8 +104,8 @@ def resolve(parts: list, issues: list, issue_type) -> list:
     coils: dict = {}
     for k in COILS:
         for p in by_kind.get(k, []):
-            if _fold(p.tag):
-                coils.setdefault(_fold(p.tag), []).append(p)
+            if _tag(p):
+                coils.setdefault(_tag(p), []).append(p)
     for group in coils.values():
         if len(group) > 1:
             issues.append(issue_type("warning", f"{len(group)} coils are tagged {group[0].tag}. Contacts with that tag follow the "
@@ -126,7 +131,7 @@ def _solenoids(parts, coils, used, out, issues, issue_type):
         sides = simlinks.solenoid_sides(p.comp)
         if not sides:
             continue
-        tag = _fold(p.tag)
+        tag = _tag(p)
         matched = 0
         for side in sides:
             named = _prop(p.comp, simlinks.SOLENOID_A if side == "a" else simlinks.SOLENOID_B)
@@ -152,8 +157,8 @@ def _solenoids(parts, coils, used, out, issues, issue_type):
                                                 f"{p.tag}a and {p.tag}b, so it's clear which is which.", p.key))
         if not matched and any(q.medium == "el" for q in parts):
             names = " and ".join(f"{p.tag}{s}" for s in sides) if len(sides) > 1 else p.tag
-            issues.append(issue_type("info", f"{p.tag}: no coil named {names}, so operate its solenoid by clicking the valve.",
-                                     p.key))
+            say = f"no coil named {names}" if tag else "it has no tag to find a coil by"
+            issues.append(issue_type("info", f"{p.tag}: {say}, so operate its solenoid by clicking the valve.", p.key))
 
 
 def _names_for(tag, side, count) -> list:
@@ -168,14 +173,14 @@ def _names_for(tag, side, count) -> list:
 def _contacts(parts, by_kind, coils, used_coils, out, issues, issue_type):
     sensors = [p for k in SENSING + CONTACTS for p in by_kind.get(k, [])]
     seen = set()
-    actuators = {_fold(p.tag): p for k in FLUID_ACTUATORS for p in by_kind.get(k, []) if _fold(p.tag)}
-    pressures = {_fold(p.tag): p for k in FLUID_PRESSURE for p in by_kind.get(k, []) if _fold(p.tag)}
-    overloads = {_fold(p.tag): p for p in by_kind.get("overload", []) if _fold(p.tag)}
+    actuators = {_tag(p): p for k in FLUID_ACTUATORS for p in by_kind.get(k, []) if _tag(p)}
+    pressures = {_tag(p): p for k in FLUID_PRESSURE for p in by_kind.get(k, []) if _tag(p)}
+    overloads = {_tag(p): p for p in by_kind.get("overload", []) if _tag(p)}
     for p in sensors:
         if p.key in seen:
             continue
         seen.add(p.key)
-        tag = _fold(p.tag)
+        tag = _tag(p)
         senses = _prop(p.comp, simlinks.SENSES)
         if senses:
             sense = parse_senses(senses)
@@ -229,13 +234,13 @@ def _contacts(parts, by_kind, coils, used_coils, out, issues, issue_type):
 
 
 def _motors(by_kind, parts, out, issues, issue_type):
-    motors = {_fold(p.tag): p for k in ("emotor", "emotor3") for p in by_kind.get(k, []) if _fold(p.tag)}
+    motors = {_tag(p): p for k in ("emotor", "emotor3") for p in by_kind.get(k, []) if _tag(p)}
     if not motors:
         return
     for k in _PUMPS:
         for pump in by_kind.get(k, []):
             named = _prop(pump.comp, simlinks.DRIVEN_BY)
-            motor = motors.get(_fold(named)) if named else motors.get(_fold(pump.tag))
+            motor = motors.get(_fold(named)) if named else motors.get(_tag(pump))
             if motor is not None:
                 out.append(Link("motor", motor.key, pump.key, f"Motor {motor.tag} drives {pump.tag}"))
             elif named:
