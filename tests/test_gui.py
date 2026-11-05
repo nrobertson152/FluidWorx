@@ -499,3 +499,76 @@ def test_a_race_is_told_to_the_user_and_is_in_the_report(app, tmp_path):
     app.reset()
     app._refresh_views(force=True)
     assert "1 race" in app.check_label.cget("text")
+
+
+def test_failing_a_part_from_the_window(app):
+    open_ex(app)
+    valve = next(k for k, b in app.sim.parts.items() if b.part.kind == "dcv")
+    a = app.sim.actuators()[0]
+    app.select(valve, reveal=True)
+    pump(app)
+    app.set_fault(valve, "stuck")
+    pump(app)
+    assert app.sim.faults == {valve: "stuck"}
+    assert "1 FAILED ON PURPOSE" in app.fault_label.cget("text") and app.fault_label.winfo_ismapped()
+    assert app.canvas.find_withtag("failedpart")
+    assert [app.faults_panel.tree.item(i)["values"][1] for i in app.faults_panel.tree.get_children()] == ["Spool stuck where it is"]
+    app.command(valve, "left")
+    app.sim.run(1.0)
+    assert a.x == 0.0
+    # it stays through a reset, and is put right from the list
+    app.reset()
+    assert app.sim.faults == {valve: "stuck"}
+    app.faults_panel.tree.selection_set(app.faults_panel.tree.get_children()[0])
+    app.faults_panel._put_right()
+    pump(app)
+    assert app.sim.faults == {} and not app.fault_label.winfo_ismapped()
+    assert not app.canvas.find_withtag("failedpart")
+
+
+def test_failing_a_wire_from_the_window(app):
+    open_ex(app, "relay_latch.schematix")
+    sheet = next(s for s in app.circuit.project.sheets if any((s.uid, w) in app.circuit.el_wire_nodes for w in s.wires))
+    app.show_sheet(sheet.uid)
+    pump(app)
+    ref = next(r for r in app.circuit.el_wire_nodes if r[0] == sheet.uid)
+    app.set_line_fault(ref, True)
+    pump(app)
+    assert app.sim.line_fault(ref) == "Broken"
+    assert app.canvas.find_withtag("failed")
+    assert ref not in app.circuit.el_wire_nodes
+    app.running = True
+    app._tick()
+    app.running = False
+    app.put_everything_right()
+    pump(app)
+    assert app.sim.fault_rows() == [] and ref in app.circuit.el_wire_nodes
+    assert not app.canvas.find_withtag("failed")
+
+
+def test_a_fault_survives_the_simulation_starting_again(app, tmp_path):
+    """Setting a link rebuilds the simulator. The question being asked still stands."""
+    open_ex(app, "relay_latch.schematix")
+    key = next(k for k, b in app.sim.parts.items() if b.part.kind == "coil")
+    wire = next(iter(app.circuit.el_wire_nodes))
+    app.set_fault(key, "open")
+    app.set_line_fault(wire, True)
+    app._activate(app.study, app.study_path, keep_view=True)
+    pump(app)
+    assert app.sim.faults == {key: "open"} and app.sim.line_fault(wire) == "Broken"
+    open_ex(app, "lift_cylinder.schematix")
+    assert app.sim.fault_rows() == [] and not app.fault_label.winfo_ismapped()
+
+
+def test_every_inspector_with_a_fault_list_opens(app):
+    open_ex(app, "plc_cylinder.schematix")
+    for key in app.sim.parts:
+        app.select(key, reveal=True)
+    pump(app)
+    plc = app.sim.net.plcs[0].part.key
+    choices = app.sim.fault_choices(plc)
+    assert choices[0][0] == "stop" and any(c[0].startswith("Q0") for c in choices)
+    app.select(plc, reveal=True)
+    app.set_fault(plc, "stop")
+    pump(app)
+    assert "Failed: CPU stopped" in app.inspector.status_var.get()

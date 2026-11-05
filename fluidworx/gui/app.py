@@ -24,7 +24,7 @@ from ..vendor.openschematix.gui import theme as th
 from ..vendor.openschematix.gui.widgets import IconButton, ToastHost, ToolbarSeparator, Tooltip, set_current_theme
 from . import icons_extra  # noqa: F401  (registers FluidWorx's icons)
 from .dialogs import AboutDialog, CalderaImportDialog, PreferencesDialog, RevisionDialog, ShortcutsDialog
-from .panels import ChecksPanel, CircuitPanel, EventsPanel, Inspector, LinksPanel, TracePanel
+from .panels import ChecksPanel, CircuitPanel, EventsPanel, FaultsPanel, Inspector, LinksPanel, TracePanel
 from .simcanvas import SimCanvas
 
 FILETYPES_ALL = [("FluidWorx and OpenSchematix files", "*.fluidworx *.schematix *.osch"),
@@ -147,10 +147,12 @@ class App:
         self.events_panel = EventsPanel(self.dock, self)
         self.checks_panel = ChecksPanel(self.dock, self)
         self.links_panel = LinksPanel(self.dock, self)
+        self.faults_panel = FaultsPanel(self.dock, self)
         self.dock.add(self.trace_panel, text="Trace")
         self.dock.add(self.events_panel, text="Events")
         self.dock.add(self.checks_panel, text="Checks")
         self.dock.add(self.links_panel, text="Links")
+        self.dock.add(self.faults_panel, text="Faults")
         self.vpane.add(self.dock, weight=2)
         self.right = ttk.Notebook(self.hpane)
         self.inspector = Inspector(self.right, self)
@@ -359,6 +361,10 @@ class App:
         self.units_label.pack(side="right", padx=1)
         self.units_label.bind("<Button-1>", lambda e: self.set_units("us" if self.units.system == "metric" else "metric"))
         Tooltip(self.units_label, "Switch between metric and US customary")
+        self.fault_label = tk.Label(sb, text="", padx=6, pady=1, cursor="hand2")
+        self.fault_label._theme_bg = "status"
+        self.fault_label.bind("<Button-1>", lambda e: self.dock.select(self.faults_panel))
+        Tooltip(self.fault_label, "Parts and lines failed on purpose: click to see them")
         self.check_label = ttk.Label(sb, text="", style="Status.TLabel", cursor="hand2")
         self.check_label.pack(side="right", padx=(8, 8))
         self.check_label.bind("<Button-1>", lambda e: self.dock.select(self.checks_panel))
@@ -498,11 +504,18 @@ class App:
             raise circuit_mod.CircuitError("This file has no hydraulic, pneumatic or electrical parts to simulate.")
         circuit_mod.apply_study_params(c, st.params)
         was_sheet = self.doc.uid if keep_view and self.doc is not None else None
+        failed = self.sim.fault_rows() if keep_view and self.sim is not None else []
+        faults = dict(self.sim.faults) if failed else {}
         self.running = False
         self.canvas.doc = None      # nothing may draw the old circuit with the new simulator's arrays
         self.study, self.study_path = st, st_path
         self.circuit = c
         self.sim = engine.Simulator(c)
+        for ref, _what, _fault in failed:   # the same question still stands, for whatever is still in the drawing
+            if ref in faults:
+                self.sim.set_fault(ref, faults[ref])
+            else:
+                self.sim.set_line_fault(ref, True)
         self.flowpaths = FlowPaths(c)
         self.currentpaths = FlowPaths(c, electric=True) if c.electrical_parts else None
         self.selected = None
@@ -518,8 +531,10 @@ class App:
         self.trace_panel.rebuild()
         self.checks_panel.rebuild()
         self.links_panel.rebuild()
+        self.faults_panel.rebuild()
         self.show_sheet(was_sheet if was_sheet in c.sheets else c.sheets[0])
         self._update_check_label()
+        self._update_fault_label()
         self._update_title()
         self._update_play()
         self.source_mtime = self._mtime(st.source_path)
@@ -744,6 +759,56 @@ class App:
         self.select(key, reveal=True)
         self.toast("Link changed. The simulation has started again.")
 
+    # ---- failing things on purpose
+    def set_fault(self, key, name):
+        if self.sim is not None and self.sim.set_fault(key, name):
+            self._faults_changed()
+
+    def set_line_fault(self, ref, failed):
+        if self.sim is not None and self.sim.set_line_fault(ref, failed):
+            self._lines_changed()
+            self._faults_changed()
+
+    def put_right(self, ref):
+        if self.sim is None:
+            return
+        if ref in self.sim.faults:
+            self.set_fault(ref, None)
+        else:
+            self.set_line_fault(ref, False)
+
+    def put_everything_right(self):
+        if self.sim is not None:
+            self.sim.clear_faults()
+            self._lines_changed()
+            self._faults_changed()
+
+    def _lines_changed(self):
+        """A broken wire changes which wires are joined: the view works that out when it's given the sheet."""
+        if self.currentpaths is not None:
+            self.currentpaths = FlowPaths(self.circuit, electric=True)
+        if self.doc is not None:
+            self.canvas.set_doc(self.doc, fit=False)
+
+    def _faults_changed(self):
+        if not self.running:
+            self.sim.step()     # so that it shows while paused, like a click
+            self.sim.trace.maybe_record()
+        self.faults_panel.rebuild()
+        self._update_fault_label()
+        self.inspector.show(self.selected)
+        self.canvas.redraw()
+        self._refresh_views(force=True)
+
+    def _update_fault_label(self):
+        n = len(self.sim.fault_rows()) if self.sim is not None else 0
+        if n:
+            u = self.theme.ui
+            self.fault_label.configure(text=f"{n} FAILED ON PURPOSE", bg=u["status"], fg=u["danger"], font=self.theme.fonts["heading"])
+            self.fault_label.pack(side="right", padx=8, before=self.check_label)
+        else:
+            self.fault_label.pack_forget()
+
     def _drawn_prop(self, key, prop) -> str:
         """What the schematic itself says, without this study's overlay."""
         project, _warn = circuit_mod.load_project_bytes(self.study.source_bytes, self.study.source_ext)
@@ -904,6 +969,7 @@ class App:
 
     def _on_theme(self):
         self._update_toggles()
+        self._update_fault_label()
         self._style_time()
         self._rebuild_tabs()
         self.checks_panel.rebuild()

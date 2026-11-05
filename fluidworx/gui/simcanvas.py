@@ -240,8 +240,11 @@ class SimCanvas(DrawingView):
             width = max(1.5, it.get("wpx", 1.4) * self.zoom * 1.5)
             pts = [v for p in it["pts"] for v in self.to_screen(p)]
             dash = (max(2, int(6 * self.zoom)), max(2, int(3 * self.zoom))) if it.get("dash") else None
-            cid = self.create_line(*pts, fill=c["wire"], width=width, dash=dash, capstyle="round", joinstyle="round",
-                                   tags="wire")
+            failed = self.sim.line_fault((self.doc.uid, it["item"]))
+            cid = self.create_line(*pts, fill=ALARM if failed == "Broken" else c["wire"], width=width, dash=(4, 4) if failed == "Broken" else dash,
+                                   capstyle="round", joinstyle="round", tags="wire")
+            if failed:
+                self._draw_cross(pts)
             if node is not None:
                 self.node_items.setdefault(node, []).append(cid)
             else:
@@ -280,10 +283,34 @@ class SimCanvas(DrawingView):
             v["key"] = None
             v["text"] = valve_text.get(cid, [])
         self._make_badges()
+        self._draw_failed()
         self._draw_selection()
         self._draw_legend()
         self._ready = True
         self.update_state(0.0, force=True)
+
+    def _draw_cross(self, pts):
+        """A red cross on a line, in the middle of its longest stretch, for one that has failed on purpose."""
+        pairs = list(zip(pts[0::2], pts[1::2]))
+        (x0, y0), (x1, y1) = max(zip(pairs, pairs[1:]), key=lambda s: math.hypot(s[1][0] - s[0][0], s[1][1] - s[0][1]))
+        x, y = (x0 + x1) / 2, (y0 + y1) / 2
+        r = max(4.0, 5.0 * self.zoom)
+        for dx in (r, -r):
+            self.create_line(x - dx, y - r, x + dx, y + r, fill=ALARM, width=max(2.0, 2.0 * self.zoom), tags="failed")
+
+    def _draw_failed(self):
+        """A part failed on purpose is marked on the drawing, so that no one takes what follows for normal."""
+        self.delete("failedpart")
+        for key in self.sim.faults:
+            comp = self.doc.components.get(key[1]) if key[0] == self.doc.uid else None
+            if comp is None:
+                continue
+            b = comp.bbox()
+            x0, y0 = self.to_screen((b[0] - 3, b[1] - 3))
+            x1, y1 = self.to_screen((b[2] + 3, b[3] + 3))
+            self.create_rectangle(x0, y0, x1, y1, outline=ALARM, dash=(6, 3), width=2, tags=("failed", "failedpart"))
+            self.create_text(x1, y1 + 2, text="FAILED", anchor="ne", fill=ALARM, font=(self.font_family, -max(9, int(9 * min(self.zoom, 1.6))), "bold"),
+                             tags=("failed", "failedpart"))
 
     def _draw_selection(self):
         self.delete("selection")
@@ -779,19 +806,36 @@ class SimCanvas(DrawingView):
             self.app.command(part.key, "toggle")
 
     def _on_right(self, e):
-        part = self.part_at(e.x, e.y)
-        if part is None:
-            return
-        self.app.select(part.key)
-        b = self.sim.parts[part.key]
-        acts = b.actions()
-        m = tk.Menu(self, tearoff=0)
         from ..vendor.openschematix.gui import theme as th
-        for name, label, on in acts:
-            m.add_command(label=("✓ " if on else "") + label, command=lambda n=name: self.app.command(part.key, n))
-        if acts:
-            m.add_separator()
-        m.add_command(label="Reset this part's values to the drawing", command=lambda: self.app.reset_part_params(part.key))
+        part = self.part_at(e.x, e.y) if self.sim is not None else None
+        m = tk.Menu(self, tearoff=0)
+        if part is None:
+            wire = self.wire_at(e.x, e.y) if self.sim is not None else None
+            how = self.sim.line_can_fail((self.doc.uid, wire.id)) if wire is not None else ""
+            if not how:
+                return
+            ref = (self.doc.uid, wire.id)
+            if self.sim.line_fault(ref):
+                m.add_command(label="Repair this line", command=lambda: self.app.set_line_fault(ref, False))
+            else:
+                m.add_command(label="Break this wire" if how == "Broken" else "Burst this line", command=lambda: self.app.set_line_fault(ref, True))
+        else:
+            self.app.select(part.key)
+            b = self.sim.parts[part.key]
+            acts = b.actions()
+            for name, label, on in acts:
+                m.add_command(label=("✓ " if on else "") + label, command=lambda n=name: self.app.command(part.key, n))
+            if acts:
+                m.add_separator()
+            choices = b.fault_choices()
+            if choices:
+                sub = tk.Menu(m, tearoff=0)
+                sub.add_command(label=("✓ " if b.fault is None else "") + "Working", command=lambda: self.app.set_fault(part.key, None))
+                for name, label in choices:
+                    sub.add_command(label=("✓ " if b.fault == name else "") + label, command=lambda n=name: self.app.set_fault(part.key, n))
+                m.add_cascade(label="What if it fails", menu=sub)
+                th.recolor_menu(sub, self.theme)
+            m.add_command(label="Reset this part's values to the drawing", command=lambda: self.app.reset_part_params(part.key))
         th.recolor_menu(m, self.theme)
         try:
             m.tk_popup(e.x_root, e.y_root)

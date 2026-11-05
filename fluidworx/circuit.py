@@ -419,6 +419,96 @@ class _Sets:
         self.up[self.find(a)] = self.find(b)
 
 
+def _named_lines(project, el, key_of, term_net) -> list:
+    """(node key, volts, label, part key) for everything whose label says what line it's on."""
+    named = []
+    for p in el:
+        if p.kind in ("rail", "point") and len(p.names) == 1:
+            label = (p.comp.label or p.comp.designator or "").strip()
+            value = links_mod.parse_rail(label)
+            if value is None and p.kind == "rail":
+                value = 24.0 if p.comp.symbol.endswith(".pos") else 0.0
+                label = label or ("+24V" if value else "0V")
+            if value is not None:
+                named.append((key_of(p, p.names[0]), value, label, p.key))
+    for doc in project.sheets:
+        for c in doc.components.values():
+            if c.symbol in OFFPAGE_IDS and netlist.link_label(c):
+                for name in c.terminals():
+                    ni = term_net.get((doc.uid, c.id, name))
+                    if ni is not None:
+                        value = links_mod.parse_rail(netlist.link_label(c))
+                        if value is not None:
+                            named.append((("net", ni), value, netlist.link_label(c), None))
+    return named
+
+
+def split_nets(circuit, broken, drawn_terms, drawn_wires) -> list:
+    """What comes apart if these wires are gone: (node, pieces), for each node that does. A piece is (terminal refs, wire refs),
+    and the first keeps the node, so whatever holds a line at its voltage stays where it is. Names still join: a +24V at both ends
+    of a broken wire is still one line, and a terminal block still joins its two sides."""
+    project = circuit.project
+    kept = []
+    for sheet, wire in broken:
+        doc = project.find_sheet(sheet)
+        if doc is not None:
+            kept.append((doc, dict(doc.wires)))
+            doc.wires.pop(wire, None)
+    try:
+        with symbols.project_scope(project):
+            nets = netlist.compute_nets(project)
+    finally:
+        for doc, wires in reversed(kept):
+            doc.wires.clear()
+            doc.wires.update(wires)
+    term_net = {tuple(t): i for i, n in enumerate(nets) for t in n.terminals}
+    wire_net = {tuple(w): i for i, n in enumerate(nets) for w in n.wires}
+
+    def key_of(p, name):
+        ref = (p.sheet, p.comp.id, name)
+        ni = term_net.get(ref)
+        return ("net", ni) if ni is not None else ("pin", ref)
+    sets = _Sets()
+    el = circuit.electrical_parts
+    for p in el:
+        if p.kind == "feedthrough" and len(p.names) >= 2:
+            sets.union(key_of(p, p.names[0]), key_of(p, p.names[1]))
+        elif p.kind == "ground":
+            sets.union(key_of(p, p.names[0]), "gnd")
+    live_labels = {links_mod.rail_key(label, value) for _n, value, label, _k in circuit.el_rails}
+    holds_a_voltage = {sets.find("gnd")}
+    for key, value, label, _part in _named_lines(project, el, key_of, term_net):
+        line = links_mod.rail_key(label, value)
+        sets.union(key, ("line", line))
+        if line in live_labels or value == 0.0:
+            holds_a_voltage.add(("line", line))
+    holds_a_voltage = {sets.find(k) for k in holds_a_voltage}
+    by_node: dict = {}
+
+    def piece(node, root):
+        return by_node.setdefault(node, {}).setdefault(root, ([], []))
+    by_ref = {p.key: p for p in el}
+    for ref, node in drawn_terms.items():
+        p = by_ref.get((ref[0], ref[1]))
+        if p is not None:
+            piece(node, sets.find(key_of(p, ref[2])))[0].append(ref)
+    for ref, node in drawn_wires.items():
+        if ref in broken or ref not in wire_net:
+            continue
+        piece(node, sets.find(("net", wire_net[ref])))[1].append(ref)
+    out = []
+
+    def rank(root_piece):
+        root, (terms, wires) = root_piece
+        at_a_source = sum(1 for ref in terms if by_ref[(ref[0], ref[1])].kind in _SOURCES + ("plc",)
+                          and ref[2] in _REFERENCE_TERMINALS)
+        return (root in holds_a_voltage, at_a_source, len(terms) + len(wires))
+    for node, pieces in by_node.items():
+        if len(pieces) > 1:
+            out.append((node, [p for _root, p in sorted(pieces.items(), key=rank, reverse=True)]))
+    return out
+
+
 def _electric_nodes(project, parts, term_net, wire_net) -> dict:
     """One node per electrical net, with terminals and earths merged, and a 0 V reference in every circuit.
 
@@ -437,7 +527,6 @@ def _electric_nodes(project, parts, term_net, wire_net) -> dict:
         ref = (p.sheet, p.comp.id, name)
         ni = term_net.get(ref)
         return ("net", ni) if ni is not None else ("pin", ref)
-    named = []          # (node key, volts, label, part key)
     for p in el:
         for name in p.names:
             nodes.find(key_of(p, name))
@@ -447,26 +536,12 @@ def _electric_nodes(project, parts, term_net, wire_net) -> dict:
             nodes.union(key_of(p, p.names[0]), key_of(p, p.names[1]))
         elif p.kind == "ground":
             nodes.union(key_of(p, p.names[0]), GND)
-        elif p.kind in ("rail", "point") and len(p.names) == 1:
-            label = (p.comp.label or p.comp.designator or "").strip()
-            value = links_mod.parse_rail(label)
-            if value is None and p.kind == "rail":
-                value = 24.0 if p.comp.symbol.endswith(".pos") else 0.0
-                label = label or ("+24V" if value else "0V")
-            if value is not None:
-                named.append((key_of(p, p.names[0]), value, label, p.key))
-                if p.kind == "rail":
-                    set_to = abs(value) if isinstance(value, complex) else value
-                    p.params["voltage"] = p.base_params["voltage"] = set_to
-    for doc in project.sheets:
-        for c in doc.components.values():
-            if c.symbol in OFFPAGE_IDS and netlist.link_label(c):
-                for name in c.terminals():
-                    ni = term_net.get((doc.uid, c.id, name))
-                    if ni is not None and ("net", ni) in nodes.up:
-                        value = links_mod.parse_rail(netlist.link_label(c))
-                        if value is not None:
-                            named.append((("net", ni), value, netlist.link_label(c), None))
+    named = [n for n in _named_lines(project, el, key_of, term_net) if n[0] in nodes.up]
+    for key, value, _label, part_key in named:
+        part = next((p for p in el if p.key == part_key), None)
+        if part is not None and part.kind == "rail":
+            set_to = abs(value) if isinstance(value, complex) else value
+            part.params["voltage"] = part.base_params["voltage"] = set_to
     same_line = {}
     for key, value, label, _part in named:
         line = links_mod.rail_key(label, value)

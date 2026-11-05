@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 
 from .circuit import Circuit, Part
-from .electric import BEHAVIOURS as ELECTRIC_BEHAVIOURS, Network
+from .electric import BEHAVIOURS as ELECTRIC_BEHAVIOURS, Failable, Network
 from .linsolve import System, solve
 from .vendor.openschematix.symbols.fluid import LAYOUTS, PATTERNS, VALVE_TYPES, normal_position
 
@@ -77,7 +77,7 @@ class Seat:
         return self.g * (p[self.a] - p[self.b] - self.crack) if self.open else 0.0
 
 
-class Behaviour:
+class Behaviour(Failable):
     """What one part does. Subclasses provide stamp/update; flows() reports signed flow into each terminal."""
     interactive = False
 
@@ -144,6 +144,37 @@ class Behaviour:
     def command(self, name) -> bool:
         return False
 
+    # ---- failing on purpose
+    def _apply_fault(self, name):
+        """"blocked" and "open" take the whole part out: nothing passes, or everything does, whatever it was doing."""
+        if name not in ("blocked", "open"):
+            return
+        pairs = self._fault_pairs()
+        g = self.m["g_pass"] if name == "open" else 0.0
+
+        def stamp(s):
+            if g:
+                for a, b in pairs:
+                    s.line(self.t[a], self.t[b], g)
+
+        def flows(p):
+            out = {}
+            for a, b in pairs:
+                q = g * (p[self.t[a]] - p[self.t[b]])
+                out[a] = out.get(a, 0.0) + q
+                out[b] = out.get(b, 0.0) - q
+            return out
+
+        def readings(p=None):
+            return [("Flow", "flow", max((abs(q) for q in flows(self.sim.p if p is None else p).values()), default=0.0))]
+        self.stamp, self.flows, self.readings = stamp, flows, readings
+        self.update = lambda p: False
+        for seat in self.seats:
+            seat.open = False
+
+
+BLOCKED_OR_OPEN = (("blocked", "Stuck closed"), ("open", "Stuck open"))
+
 
 class Inert(Behaviour):
     def status(self, p):
@@ -151,6 +182,8 @@ class Inert(Behaviour):
 
 
 class Passage(Behaviour):
+    FAULTS = (("blocked", "Blocked"),)
+
     def __init__(self, sim, part):
         super().__init__(sim, part)
         pairs = part.spec.options.get("pairs") or ([(0, 1)] if len(part.names) >= 2 else [])
@@ -168,6 +201,11 @@ class Passage(Behaviour):
 
 
 class Nozzle(Behaviour):
+    FAULTS = (("blocked", "Blocked"),)
+
+    def _fault_pairs(self):
+        return []
+
     def stamp(self, s):
         s.line(self.node(0), self.sim.circuit.gnd, self.m["g_pass"] * 0.01)
 
@@ -181,6 +219,7 @@ class Nozzle(Behaviour):
 class Pump(Behaviour):
     """Flow source. Stalls at a pressure limit: the compensator, or the ceiling of a blocked fixed pump."""
     interactive = True
+    FAULTS = (("failed", "No output"),)
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -189,7 +228,7 @@ class Pump(Behaviour):
         self.reversed = False
         self.mode = "full"
         self.compensated = part.kind in ("pump_pc", "compressor")
-        self.fault = False
+        self.blocked = False
 
     @property
     def ends(self):
@@ -201,7 +240,7 @@ class Pump(Behaviour):
         return pl, max(pl * 0.04, 1e3)
 
     def stamp(self, s):
-        if not self.running:
+        if not self.running or self.fault:
             return
         out, inn = self.ends
         qn = self.part.params["flow"]
@@ -225,7 +264,7 @@ class Pump(Behaviour):
         return False
 
     def q(self, p):
-        if not self.running or self.mode == "zero":
+        if not self.running or self.fault or self.mode == "zero":
             return 0.0
         qn = self.part.params["flow"]
         if self.mode == "full":
@@ -239,11 +278,11 @@ class Pump(Behaviour):
         return {inn: q, out: -q}
 
     def commit(self, p, dt):
-        self.fault = self.running and not self.compensated and self.mode != "full"
+        self.blocked = self.running and not self.fault and not self.compensated and self.mode != "full"
 
     def reset(self):
         self.mode = "full"
-        self.fault = False
+        self.blocked = False
         if self.driven_by is not None:
             self.running = False
 
@@ -256,7 +295,7 @@ class Pump(Behaviour):
     def status(self, p):
         if not self.running:
             return "Stopped" if self.driven_by is None else f"Stopped: {self.driven_by} is off"
-        if self.fault:
+        if self.blocked:
             return "Blocked: pressure limit reached"
         if self.compensated and self.mode != "full":
             return "Compensating" if self.part.kind == "pump_pc" else "At set pressure"
@@ -283,6 +322,7 @@ class Pump(Behaviour):
 
 class Relief(Behaviour):
     interactive = False
+    FAULTS = (("blocked", "Stuck closed: it won't relieve"), ("open", "Stuck open"))
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -338,6 +378,7 @@ class Relief(Behaviour):
 
 class Unloading(Behaviour):
     """Opens fully while the pressure at X is above the setting."""
+    FAULTS = BLOCKED_OR_OPEN
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -376,6 +417,7 @@ class Unloading(Behaviour):
 class Sequence(Behaviour):
     """Holds its inlet at the setting while passing flow on, so the first actuator keeps its pressure while the
     second moves. Once the outlet needs more than the setting, it is simply open."""
+    FAULTS = BLOCKED_OR_OPEN
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -423,6 +465,7 @@ class Sequence(Behaviour):
 
 class Reducer(Behaviour):
     """Fully open below the setting, then holds the outlet at the setting; closed if the outlet is above it."""
+    FAULTS = BLOCKED_OR_OPEN
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -484,6 +527,8 @@ def g_tol(m):
 
 
 class Check(Behaviour):
+    FAULTS = (("blocked", "Stuck closed"), ("open", "Stuck open: it no longer checks"))
+
     def __init__(self, sim, part):
         super().__init__(sim, part)
         self.seat = Seat(self.node(0), self.node(1), self.names[0], self.names[1], self.m["g_seat"])
@@ -566,14 +611,29 @@ class Shuttle(Behaviour):
     def __init__(self, sim, part):
         super().__init__(sim, part)
         g = self.m["g_seat"]
-        self.seats = [Seat(self.node(0), self.node(2), self.names[0], self.names[2], g),
-                      Seat(self.node(1), self.node(2), self.names[1], self.names[2], g)]
+        self.all_seats = [Seat(self.node(0), self.node(2), self.names[0], self.names[2], g),
+                          Seat(self.node(1), self.node(2), self.names[1], self.names[2], g)]
+        self.seats = self.all_seats
+
+    def fault_choices(self):
+        ports = [self.part.comp.terminal_label(n) for n in self.names[:2]]
+        return [("stuck_1", f"Stuck: only port {ports[0]} passes"), ("stuck_2", f"Stuck: only port {ports[1]} passes")]
+
+    def _apply_fault(self, name):
+        self.all_seats[1 if name == "stuck_1" else 0].open = False
+        self.seats = self.all_seats[:1] if name == "stuck_1" else self.all_seats[1:]
+
+    def set_fault(self, name):
+        self.seats = self.all_seats
+        return super().set_fault(name)
 
     def status(self, p):
         return "From " + self.part.comp.terminal_label(self.names[0 if p[self.node(0)] >= p[self.node(1)] else 1])
 
 
 class Throttle(Behaviour):
+    FAULTS = (("blocked", "Blocked"), ("open", "Stuck fully open"))
+
     def opening(self):
         return self.part.params["opening"]
 
@@ -609,6 +669,7 @@ class OneWay(Throttle):
 
 class FlowPC(Behaviour):
     """Holds a set flow 1->2 however large the pressure drop; free 2->1 through a bypass unless it has none."""
+    FAULTS = (("blocked", "Blocked"), ("open", "Stuck fully open"))
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -670,6 +731,7 @@ class FlowPC(Behaviour):
 class Switched(Behaviour):
     """Two-state valves toggled by the user. Each state is a list of (from, to, "line" | "check")."""
     interactive = True
+    FAULTS = (("stuck", "Stuck as it is"),)
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -704,7 +766,7 @@ class Switched(Behaviour):
         return [("toggle", "Switch to: " + self.labels[1 - self.state], self.state == 1)]
 
     def command(self, name):
-        if name == "toggle":
+        if name == "toggle" and not self.fault:
             self.state = 1 - self.state
             self._configure()
             return True
@@ -712,7 +774,7 @@ class Switched(Behaviour):
 
     def set_energised(self, side, on, fraction=1.0):
         want = 1 if on else 0
-        if want != self.state:
+        if want != self.state and not self.fault:
             self.state = want
             self._configure()
             self.sim.touch()
@@ -727,9 +789,17 @@ class Switched(Behaviour):
 class Prop(Throttle):
     interactive = True
     signal = None           # opening from its coil, 0..100, when it has one
+    FAULTS = (("blocked", "Blocked"), ("open", "Stuck fully open"), ("stuck", "Stuck at this opening"))
+    stuck_at = 0.0
 
     def opening(self):
+        if self.fault == "stuck":
+            return self.stuck_at
         return self.part.params["opening"] if self.signal is None else self.signal
+
+    def set_fault(self, name):
+        self.stuck_at = self.opening()
+        return super().set_fault(name)
 
     def set_energised(self, side, on, fraction=1.0):
         value = 100.0 * fraction if on else 0.0
@@ -750,6 +820,7 @@ class Valve(Behaviour):
     """Parametric directional control valve. Position order is left to right, as drawn; an operator on the
     left pushes the left-hand envelope over the ports."""
     interactive = True
+    FAULTS = (("stuck", "Spool stuck where it is"),)
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -830,7 +901,7 @@ class Valve(Behaviour):
 
     def _apply(self):
         pos = self.target_position()
-        if pos != self.position:
+        if pos != self.position and not self.fault:
             self.position = pos
             self._configure()
             return True
@@ -879,6 +950,7 @@ class Valve(Behaviour):
 class Actuator(Behaviour):
     """Linear or rotary: one velocity unknown. Positive velocity = fluid into the first port."""
     interactive = False
+    FAULTS = (("seized", "Seized: it won't move"), ("leak", "Seal leaking"))
 
     def __init__(self, sim, part):
         super().__init__(sim, part)
@@ -944,9 +1016,18 @@ class Actuator(Behaviour):
     def p_b(self, p):
         return p[self.b_node] if self.b_node is not None else 0.0
 
+    def _leak_to(self):
+        """Where a leaking seal lets the fluid go: the other side of the piston, or out."""
+        return self.b_node if self.b_node is not None else self.sim.circuit.gnd
+
+    def _leak_g(self):
+        return self.m["g_pass"] * 0.1 if self.fault == "leak" else 0.0
+
     # ---- solve
     def stamp(self, s):
         self.var = None
+        if self.fault == "leak":
+            s.line(self.a_node, self._leak_to(), self._leak_g())
         if self.dir == 0:
             return
         self.var = s.add_var()
@@ -968,6 +1049,10 @@ class Actuator(Behaviour):
         s.rhs[v] = self.load() + self.friction() * self.dir - m_dt * self.v_old
 
     def update(self, p):
+        if self.fault == "seized":
+            moving = self.dir != 0
+            self.dir, self.v = 0, 0.0
+            return moving
         v = self.sim.x_vars[self.var] if self.var is not None else 0.0
         aa, ab = self.areas()
         drive = p[self.a_node] * aa - self.p_b(p) * ab - self.load()
@@ -1017,6 +1102,11 @@ class Actuator(Behaviour):
         out = {self.names[0]: aa * self.v}
         if self.b_term is not None:
             out[self.b_term] = -ab * self.v
+        if self.fault == "leak":
+            q = self._leak_g() * (p[self.a_node] - p[self._leak_to()])
+            out[self.names[0]] += q
+            if self.b_term is not None:
+                out[self.b_term] -= q
         return out
 
     @property
@@ -1061,8 +1151,11 @@ class Actuator(Behaviour):
 
 class Accumulator(Behaviour):
     """Gas spring: fluid taken in compresses the gas above its precharge (isothermal)."""
+    FAULTS = (("gas_lost", "Lost its gas: it holds nothing"),)
 
     def extra_capacitance(self, p):
+        if self.fault:
+            return {}
         pa = self.part.params
         n = self.node(0)
         pabs = max(p[n], 0.0) + ATM
@@ -1070,6 +1163,8 @@ class Accumulator(Behaviour):
         return {n: pa["volume"] * p0 / pabs ** 2} if pabs >= p0 else {}
 
     def _stored(self, p):
+        if self.fault:
+            return 0.0
         pa = self.part.params
         pabs = max(p[self.node(0)], 0.0) + ATM
         p0 = pa["precharge"] + ATM
@@ -1118,11 +1213,16 @@ class Gauge(Behaviour):
 
 
 class PressureSwitch(Gauge):
+    FAULTS = (("stuck_off", "Stuck off"), ("stuck_on", "Stuck on"))
+
     def __init__(self, sim, part):
         super().__init__(sim, part)
         self.on = False
 
     def commit(self, p, dt):
+        if self.fault:
+            self.on = self.fault == "stuck_on"
+            return
         st = self.part.params["setting"]
         self.on = p[self.node(0)] > (st * 0.95 if self.on else st)
 
@@ -1177,6 +1277,8 @@ class Simulator:
         self.x_vars = []
         self.time = 0.0
         self.events = []
+        self.faults = {}            # part key -> its fault, while it's failed on purpose
+        self.burst = {}             # (sheet uid, wire id) -> node, for lines failed on purpose
         self.trace = Trace(self)
         self._idle = False
         self._last_status = {}
@@ -1192,6 +1294,11 @@ class Simulator:
             b.reset()
         for seat, *_ in self.cavitation:
             seat.open = False
+        for key in self.faults:
+            b = self.parts[key]
+            self.log(b.part.tag, f"Failed on purpose, from the start: {b.fault_name()}")
+        for ref in list(self.burst) + sorted(self.net.broken):
+            self.log(self.line_name(ref), f"Failed on purpose, from the start: {self.line_fault(ref)}")
         self.net.restart()
         self._idle = False
         self._last_status = {k: b.status(self.p) for k, b in self.parts.items()}
@@ -1212,6 +1319,84 @@ class Simulator:
         self.log(b.part.tag, _command_text(b, name))
         return True
 
+    # ---- failing parts and lines on purpose
+    def fault_choices(self, key) -> list:
+        b = self.parts.get(tuple(key))
+        return b.fault_choices() if b is not None else []
+
+    def set_fault(self, key, name) -> bool:
+        """Fail a part, or with None put it right. Takes effect now, while it runs."""
+        key = tuple(key)
+        b = self.parts.get(key)
+        if b is None or not b.set_fault(name):
+            return False
+        if name is None:
+            if self.faults.pop(key, None) is not None:
+                self.log(b.part.tag, "Fault removed: working again")
+        else:
+            self.faults[key] = name
+            self.log(b.part.tag, f"Failed on purpose: {b.fault_name()}")
+        self.touch()
+        return True
+
+    def line_name(self, ref) -> str:
+        """A way to tell a line in the event log and in lists: where it goes, since wires have no tags."""
+        doc = self.circuit.project.find_sheet(ref[0])
+        wire = doc.wires.get(ref[1]) if doc is not None else None
+        if wire is None:
+            return "Line"
+        ends = []
+        for end in (wire.start, wire.end):
+            comp = doc.components.get(end[0]) if isinstance(end, (list, tuple)) and len(end) == 2 else None
+            if comp is not None:
+                ends.append(f"{comp.designator or comp.symbol.rsplit('.', 1)[-1]} {end[1]}")
+        if len(ends) == 1:
+            return f"Line to {ends[0]}"
+        return " to ".join(ends) if ends else f"Line {ref[1]}"
+
+    def line_fault(self, ref) -> str:
+        """What's wrong with a drawn line: "Burst", "Broken", or nothing."""
+        if tuple(ref) in self.burst:
+            return "Burst"
+        return "Broken" if tuple(ref) in self.net.broken else ""
+
+    def line_can_fail(self, ref) -> str:
+        """What can happen to this line: "Burst" for a pipe, "Broken" for a wire, or nothing."""
+        ref = tuple(ref)
+        if ref in self.circuit.wire_nodes:
+            return "Burst"
+        return "Broken" if ref in self.net._drawn_wires else ""
+
+    def set_line_fault(self, ref, failed) -> bool:
+        """A wire breaks, and whatever was joined only through it comes apart. A pipe bursts, and its line is open to the air or the
+        tank at that point."""
+        ref = tuple(ref)
+        how = self.line_can_fail(ref)
+        if not how or bool(self.line_fault(ref)) == bool(failed):
+            return False
+        if how == "Burst":
+            if failed:
+                self.burst[ref] = self.circuit.wire_nodes[ref]
+            else:
+                del self.burst[ref]
+        else:
+            self.net.set_broken(self.net.broken | {ref} if failed else self.net.broken - {ref})
+        self.log(self.line_name(ref), f"Failed on purpose: {how.lower()}" if failed else "Fault removed: repaired")
+        self.touch()
+        return True
+
+    def fault_rows(self) -> list:
+        """(part key or wire ref, what it is, what's wrong) for everything failed on purpose."""
+        out = [(key, self.parts[key].part.tag, self.parts[key].fault_name()) for key in self.faults]
+        out += [(ref, self.line_name(ref), self.line_fault(ref)) for ref in list(self.burst) + sorted(self.net.broken)]
+        return out
+
+    def clear_faults(self):
+        for key in list(self.faults):
+            self.set_fault(key, None)
+        for ref in list(self.burst) + sorted(self.net.broken):
+            self.set_line_fault(ref, False)
+
     def log(self, tag, text):
         self.events.append((self.time, tag, text))
         if len(self.events) > 5000:
@@ -1230,6 +1415,8 @@ class Simulator:
             b.stamp(s)
         for seat, _n, _t in self.cavitation:
             seat.stamp(s)
+        for node in set(self.burst.values()):
+            s.line(node, self.circuit.gnd, MEDIUM[self.circuit.node_medium.get(node, "hyd")]["g_pass"] * 5.0)
         scale = [1e5] * self.n_free + [1.0] * (len(s.rows) - self.n_free)
         if not s.rows:
             return list(self.p), []
