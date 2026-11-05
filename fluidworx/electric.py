@@ -25,6 +25,7 @@ import math
 import re
 
 from .catalog import SENSOR_SIGNALS
+from .circuit import split_nets
 from .linsolve import System, solve
 from .vendor.openschematix import plc as plc_core
 
@@ -43,6 +44,7 @@ MAX_RACE_TRIALS = 8     # other relays tried first, at one moment: more than thi
 FUSE_I2T = 10.0         # (I/In)^2 seconds: 10x in 0.1 s, 2x in about 3 s
 BREAKER_I2T = 30.0      # 2x in 10 s; 5x and more at once
 OVERLOAD_I2T = 400.0    # 7.2x in about 8 s, 2x in about 2 minutes
+STALL_CURRENT = 6.0     # a seized motor, times its rating
 
 
 def mag(x) -> float:
@@ -61,10 +63,54 @@ def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
 
-class Part:
+class Failable:
+    """Failing a part on purpose, to see what the rest of the machine does about it. Each kind of part lists the ways it can
+    fail. A fault stays through a reset and isn't saved: it's a question being asked, not a fact about the drawing."""
+    FAULTS = ()             # (id, what it's called)
+    fault = None
+
+    def fault_choices(self) -> list:
+        return list(self.FAULTS)
+
+    def fault_name(self) -> str:
+        return dict(self.fault_choices()).get(self.fault, "")
+
+    def _fault_pairs(self) -> list:
+        """The terminals that fail open or short between them."""
+        return [(self.names[0], self.names[1])] if len(self.names) >= 2 else []
+
+    def set_fault(self, name) -> bool:
+        choices = dict(self.fault_choices())
+        if name is not None and name not in choices:
+            return False
+        for attr in _SHADOWS:
+            vars(self).pop(attr, None)
+        self.fault = name
+        if name is not None:
+            label = choices[name]
+            own_status = type(self).status
+            only_this = name in _WHOLE_PART
+
+            def status(p=None):
+                said = "" if only_this else own_status(self, p)
+                return f"{said}. Failed: {label}" if said else f"Failed: {label}"
+            self.status = status
+            self._apply_fault(name)
+        return True
+
+    def _apply_fault(self, name):
+        pass
+
+
+_SHADOWS = ("stamp", "currents", "flows", "update", "commit", "is_on", "status", "readings")
+_WHOLE_PART = ("open", "shorted", "blocked")    # what it was doing no longer means anything
+
+
+class Part(Failable):
     """What one electrical part does. `lines` are (from terminal, to terminal, conductance, emf)."""
     interactive = False
     quiet = False           # its status is shown but isn't worth a line in the event log
+    PLAIN_FAULTS = False    # "open" and "shorted" take the whole part out, whatever it was doing
 
     def __init__(self, net: "Network", part):
         self.net, self.part = net, part
@@ -146,6 +192,36 @@ class Part:
     def _state_channel(self, label=""):
         return ((self.part.key, "state"), f"{self.part.tag} {label}".strip(), "state", lambda: 1.0 if self.is_on() else 0.0)
 
+    def _apply_fault(self, name):
+        if not self.PLAIN_FAULTS or name not in ("open", "shorted"):
+            return
+        pairs = self._fault_pairs()
+        g = G_CLOSED if name == "shorted" else 0.0
+
+        def stamp(s):
+            if g:
+                for a, b in pairs:
+                    s.line(self.t[a], self.t[b], g)
+
+        def currents(v):
+            out = {}
+            for a, b in pairs:
+                i = g * (v[self.t[a]] - v[self.t[b]])
+                out[a] = out.get(a, 0.0) + i
+                out[b] = out.get(b, 0.0) - i
+            return out
+
+        def readings(p=None):
+            v = self.net.v
+            rows = []
+            for a, b in pairs[:1]:
+                rows.append(("Voltage", "voltage", mag(v[self.t[a]] - v[self.t[b]])))
+            return rows + [("Current", "current", self.through())]
+        self.stamp, self.currents, self.readings = stamp, currents, readings
+        self.update = lambda v: False
+        self.commit = lambda v, dt: None
+        self.is_on = lambda: False
+
 
 class Unsimulated(Part):
     quiet = True
@@ -164,6 +240,8 @@ class Connection(Part):
 
 class Resistor(Part):
     quiet = True
+    FAULTS = (("open", "Open circuit"), ("shorted", "Short circuit"))
+    PLAIN_FAULTS = True
 
     def current_lines(self):
         return [(self.names[0], self.names[1], 1.0 / max(self.par["ohms"], 1e-3), 0.0)]
@@ -176,17 +254,25 @@ class Resistor(Part):
 class Potentiometer(Part):
     """Ends 1 and 2, wiper 3. Set by hand, or by whatever its Senses property names."""
     quiet = True
+    FAULTS = (("frozen", "Stuck where it is"), ("wiper_open", "Wiper open circuit"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
         self.reader = None
         self.driven = None
+        self.frozen_at = 0.0
 
     def fraction(self):
+        if self.fault == "frozen":
+            return self.frozen_at
         return self.driven if self.driven is not None else clamp(self.par["wiper"] / 100.0, 0.0, 1.0)
 
+    def set_fault(self, name):
+        self.frozen_at = self.fraction()
+        return super().set_fault(name)
+
     def sense(self, dt):
-        if self.reader is not None:
+        if self.reader is not None and self.fault != "frozen":
             f = self.reader.fraction(0.0, 0.0)
             if self.driven is None or abs(f - self.driven) > 5e-4:
                 self.driven = f
@@ -194,6 +280,8 @@ class Potentiometer(Part):
 
     def current_lines(self):
         r = max(self.par["ohms"], 1e-3)
+        if self.fault == "wiper_open":
+            return [("1", "2", 1.0 / r, 0.0)]
         w = self.fraction()
         return [("1", "3", 1.0 / max(r * w, 1e-2), 0.0), ("3", "2", 1.0 / max(r * (1.0 - w), 1e-2), 0.0)]
 
@@ -203,6 +291,8 @@ class Potentiometer(Part):
 
 class Capacitor(Part):
     quiet = True
+    FAULTS = (("open", "Open circuit"), ("shorted", "Short circuit"))
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -226,6 +316,8 @@ class Capacitor(Part):
 
 class Inductor(Part):
     quiet = True
+    FAULTS = (("open", "Open circuit"), ("shorted", "Short circuit"))
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -260,6 +352,7 @@ class Inductor(Part):
 # ---------------------------------------------------------------- sources
 class Source(Part):
     """A voltage behind a small resistance, that folds back to its current limit if it has one."""
+    FAULTS = (("dead", "No output"),)
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -278,7 +371,7 @@ class Source(Part):
         return self.par.get("rint", 0.02)
 
     def live(self):
-        return True
+        return self.fault != "dead"
 
     def limit(self):
         return self.par.get("limit", 0.0)
@@ -361,6 +454,8 @@ class CurrentSource(Part):
     """A current, as far as 100 V can push it."""
     quiet = True
     COMPLIANCE = 100.0
+    FAULTS = (("open", "No output"),)
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -412,7 +507,7 @@ class PowerSupply(Source):
         return 0.02
 
     def live(self):
-        return self.on
+        return self.on and self.fault != "dead"
 
     def stamp(self, s):
         super().stamp(s)
@@ -460,6 +555,7 @@ class PowerSupply(Source):
 
 class Rectifier(Part):
     """A DC output in proportion to the AC input, that can only source current."""
+    FAULTS = (("dead", "No output"),)
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -474,7 +570,7 @@ class Rectifier(Part):
 
     def current_lines(self):
         out = [("AC1", "AC2", self.g_in, 0.0)]
-        if self.on:
+        if self.on and self.fault != "dead":
             out.append(("+", "-", 10.0, self.emf))
         return out
 
@@ -505,7 +601,7 @@ class Rectifier(Part):
         return "On" if self.emf > 1.0 else "No input"
 
     def is_on(self):
-        return self.emf > 1.0
+        return self.emf > 1.0 and self.fault != "dead"
 
     def readings(self, p=None):
         return [("DC output", "voltage", (self.net.v[self.t["+"]] - self.net.v[self.t["-"]]).real)]
@@ -514,6 +610,7 @@ class Rectifier(Part):
 class Regulator(Part):
     """A linear regulator: the set voltage while the input allows it, then the input less its dropout."""
     G = 20.0
+    FAULTS = (("dead", "No output"),)
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -548,7 +645,9 @@ class Regulator(Part):
         vo = (v[self.t["OUT"]] - v[self.t["GND"]]).real
         need = self.par["voltage"] + self.par["dropout"]
         mode = self.mode
-        if mode == "reg":
+        if self.fault == "dead":
+            mode = "off"
+        elif mode == "reg":
             if vin < need - 1e-3:
                 mode = "drop"
         elif mode == "drop":
@@ -580,6 +679,11 @@ class Regulator(Part):
 class Transformer(Part):
     """An ideal transformer with a little winding resistance. It passes whatever is on the primary, RMS or phasor."""
     quiet = True
+    FAULTS = (("open", "A winding has failed"),)
+    PLAIN_FAULTS = True
+
+    def _fault_pairs(self):
+        return [("P1", "P2")]
 
     def _windings(self):
         ratio = self.par["secondary"] / max(self.par["primary"], 1e-6)
@@ -622,6 +726,8 @@ class Transformer(Part):
 class Autotransformer(Part):
     """One winding 1-2, tapped at 3. The tap follows the supply across the winding."""
     quiet = True
+    FAULTS = (("open", "The winding has failed"),)
+    PLAIN_FAULTS = True
 
     def stamp(self, s):
         a, b, tap = self.t["1"], self.t["2"], self.t["3"]
@@ -649,6 +755,8 @@ class Diode(Part):
     """Forward: a small voltage then a small resistance. Breakdown, if it has one, the same in reverse."""
     quiet = True
     TOL = 1e-3
+    FAULTS = (("open", "Failed open"), ("shorted", "Failed short"))
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -713,6 +821,7 @@ class Zener(Diode):
 
 class Led(Diode):
     quiet = False
+    FAULTS = (("open", "Burnt out"), ("shorted", "Failed short"))
 
     def status(self, p=None):
         return "Lit" if self.is_on() else "Off"
@@ -729,6 +838,8 @@ class Bjt(Part):
     quiet = True
     RB = 10.0
     RC = 0.1
+    FAULTS = (("open", "Failed open"), ("shorted", "Failed short"))
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -737,6 +848,9 @@ class Bjt(Part):
 
     def reset(self):
         self.mode = "off"
+
+    def _fault_pairs(self):
+        return [("C", "E")]
 
     def _ends(self, a, b):
         return (a, b) if self.sign > 0 else (b, a)
@@ -805,6 +919,8 @@ class Bjt(Part):
 class Fet(Part):
     """A switch, with its on resistance, that the gate-source voltage turns on."""
     quiet = True
+    FAULTS = (("open", "Failed open"), ("shorted", "Failed short"))
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -813,6 +929,9 @@ class Fet(Part):
 
     def reset(self):
         self.on = False
+
+    def _fault_pairs(self):
+        return [("D", "S")]
 
     def current_lines(self):
         return [("D", "S", 1.0 / self.par["rds"], 0.0)] if self.on else []
@@ -839,6 +958,8 @@ class Fet(Part):
 class Thyristor(Part):
     """Off until its gate fires it, then on until the current falls below its holding current."""
     quiet = True
+    FAULTS = (("open", "Failed open"), ("shorted", "Failed short"))
+    PLAIN_FAULTS = True
     R_GATE = 1000.0
     R_ON = 0.05
     V_ON = 1.0
@@ -853,6 +974,9 @@ class Thyristor(Part):
     def reset(self):
         self.on = False
         self.direction = 1
+
+    def _fault_pairs(self):
+        return [(self.a, self.k)]
 
     def current_lines(self):
         out = [(self.g, self.k, 1.0 / self.R_GATE, 0.0)]
@@ -894,6 +1018,7 @@ class OpAmp(Part):
     no supply pins drawn, its set swing."""
     quiet = True
     G_OUT = 0.1
+    FAULTS = (("stuck_high", "Output stuck high"), ("stuck_low", "Output stuck low"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -938,6 +1063,8 @@ class OpAmp(Part):
         hi, lo = self._limits(v)
         ideal = (self.par["gain"] * (v[self.t["+"]] - v[self.t["-"]])).real
         mode = 1 if ideal > hi + 1e-3 else -1 if ideal < lo - 1e-3 else 0
+        if self.fault:
+            mode = 1 if self.fault == "stuck_high" else -1
         if mode != self.mode:
             self.mode = mode
             return True
@@ -959,6 +1086,7 @@ class Logic(Part):
     quiet = True
     G_OUT = 1 / 50.0
     G_IN = 1e-6
+    FAULTS = (("stuck_low", "Output stuck low"), ("stuck_high", "Output stuck high"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1003,6 +1131,8 @@ class Logic(Part):
         """Work out the outputs from this solution. True if any changed."""
         self._read(v)
         new = self._next()
+        if self.fault:
+            new = {n: (n == "/Q") != (self.fault == "stuck_high") for n in self.outs}
         if new != self.q:
             self.q = new
             return True
@@ -1059,6 +1189,8 @@ class Protection(Part):
     quiet = True        # it says why it opened when it does
     I2T = FUSE_I2T
     INSTANT = 0.0       # trips at once at this many times its rating
+    FAULTS = (("open", "Failed open"), ("wont_trip", "Won't trip"))
+    PLAIN_FAULTS = True
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1075,6 +1207,9 @@ class Protection(Part):
     def current_lines(self):
         return [] if self.is_open else [(a, b, G_CLOSED, 0.0) for a, b in self.poles]
 
+    def _fault_pairs(self):
+        return self.poles
+
     def _rating(self):
         return max(self.par["rating"], 1e-6)
 
@@ -1088,6 +1223,8 @@ class Protection(Part):
             return
         i = max((mag(G_CLOSED * (v[self.t[a]] - v[self.t[b]])) for a, b in self.poles), default=0.0)
         self.peak = max(self.peak, i)
+        if self.fault == "wont_trip":
+            return
         r = i / self._rating()
         if self.INSTANT and r >= self.INSTANT:
             self._trip(f"Tripped at once on {i:.1f} A")
@@ -1104,13 +1241,15 @@ class Protection(Part):
         return not self.is_open
 
     def poles_now(self):
-        return [(a, b, not self.is_open, True) for a, b in self.poles]
+        return [(a, b, not self.is_open and self.fault != "open", True) for a, b in self.poles]
 
     def trace_channels(self):
         return [self._state_channel("closed")]
 
 
 class Fuse(Protection):
+    FAULTS = (("open", "Blown"), ("wont_trip", "Won't blow: the wrong fuse is fitted"))
+
     def status(self, p=None):
         return "Blown" if self.is_open else "OK"
 
@@ -1163,6 +1302,13 @@ class Breaker(Protection):
 class Overload(Protection):
     """A thermal overload never opens the power circuit: it changes its auxiliary contacts, those with the same tag."""
     I2T = OVERLOAD_I2T
+    FAULTS = (("tripped", "Tripped"), ("wont_trip", "Won't trip"))
+    PLAIN_FAULTS = False
+
+    def is_tripped(self) -> bool:
+        if self.fault:
+            return self.fault == "tripped"
+        return self.tripped
 
     def current_lines(self):
         return [(a, b, G_CLOSED, 0.0) for a, b in self.poles]
@@ -1172,6 +1318,8 @@ class Overload(Protection):
             return
         i = max((mag(G_CLOSED * (v[self.t[a]] - v[self.t[b]])) for a, b in self.poles), default=0.0)
         self.peak = max(self.peak, i)
+        if self.fault:
+            return
         r = i / self._rating()
         self.heat = max(0.0, self.heat + (r * r - 1.1) * dt) if r > 1.05 else self.heat * (1.0 - dt / 120.0)
         if self.heat >= self.I2T:
@@ -1180,16 +1328,16 @@ class Overload(Protection):
             self.net.sim.log(self.part.tag, f"Tripped on {i:.1f} A")
 
     def status(self, p=None):
-        return "Tripped" if self.tripped else "OK"
+        return "Tripped" if self.is_tripped() else "OK"
 
     def badge(self, un):
-        return "TRIPPED" if self.tripped else ""
+        return "TRIPPED" if self.is_tripped() else ""
 
     def poles_now(self):
         return []
 
     def is_on(self):
-        return not self.tripped
+        return not self.is_tripped()
 
     def actions(self):
         return [("reset", "Reset the overload", False)] if self.tripped else []
@@ -1288,6 +1436,7 @@ class Contact(Part):
     """One or more poles that follow something: a coil, a fluid part, a position, or a click."""
     interactive = True
     quiet = True
+    FAULTS = (("stuck_open", "Stuck open"), ("stuck_closed", "Stuck closed: welded"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1318,6 +1467,8 @@ class Contact(Part):
             self.net.dirty = True
 
     def closed(self) -> bool:
+        if self.fault:
+            return self.fault == "stuck_closed"
         return self.actuated() != self.nc
 
     def current_lines(self):
@@ -1405,6 +1556,12 @@ class Selector(Contact):
 
 class Changeover(Contact):
     """Common C to A, or when operated to B."""
+    FAULTS = (("stuck_a", "Stuck to A"), ("stuck_b", "Stuck to B"))
+
+    def actuated(self):
+        if self.fault:
+            return self.fault == "stuck_b"
+        return super().actuated()
 
     def current_lines(self):
         return [("C", "B" if self.actuated() else "A", G_CLOSED, 0.0)]
@@ -1431,6 +1588,7 @@ class Rotary(Part):
     interactive = True
     quiet = True
     START = 1
+    FAULTS = (("stuck", "Stuck where it is"),)
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1455,6 +1613,8 @@ class Rotary(Part):
         return [(f"pos{i}", f"Position {i + 1}", self.position == i) for i in range(4)]
 
     def command(self, name):
+        if self.fault:
+            return False
         if name.startswith("pos") and name[3:].isdigit() and 0 <= int(name[3:]) <= 3:
             self.position = int(name[3:])
             self.net.dirty = True
@@ -1473,6 +1633,7 @@ class Prox(Part):
     """Three wires. On, its output is tied to + (PNP) or to - (NPN). It needs its own supply, like a real one."""
     interactive = True
     R_OUT = 1.0
+    FAULTS = (("stuck_off", "Output stuck off"), ("stuck_on", "Output stuck on"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1502,7 +1663,7 @@ class Prox(Part):
     def current_lines(self):
         # its own load is always there: if it went away with the supply, a loose return wire would flip it for ever
         out = [("+", "-", 1.0 / 2400.0, 0.0)]
-        if self.powered and self.detected:
+        if self.is_on():
             out.append(("+", "OUT", 1.0 / self.R_OUT, 0.0) if self.pnp else ("OUT", "-", 1.0 / self.R_OUT, 0.0))
         return out
 
@@ -1520,6 +1681,8 @@ class Prox(Part):
         return "Detecting" if self.detected else "Clear"
 
     def is_on(self):
+        if self.fault:
+            return self.powered and self.fault == "stuck_on"
         return self.powered and self.detected
 
     def click_command(self):
@@ -1559,6 +1722,7 @@ class AnalogSensor(Part):
     quiet = True
     R_OUT = 10.0
     HEADROOM = 2.0
+    FAULTS = (("lost", "Signal lost: reads zero"), ("full", "Reads full scale"), ("frozen", "Stuck at this reading"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1578,14 +1742,16 @@ class AnalogSensor(Part):
         return clamp(self.par.get("manual", 0.0) / 100.0, 0.0, 1.0)
 
     def sense(self, dt):
-        f = self._read()
+        if self.fault == "frozen":
+            return
+        f = 1.0 if self.fault == "full" else self._read()
         if abs(f - self.frac) > 2e-4:
             self.frac = f
             self.net.dirty = True
 
     def _output(self):
         unit, lo, hi = SIGNALS[_signal_name(self.par)]
-        return unit, lo + self.frac * (hi - lo)
+        return unit, 0.0 if self.fault == "lost" else lo + self.frac * (hi - lo)
 
     def stamp(self, s):
         plus, minus, out = self.t["+"], self.t["-"], self.t["OUT"]
@@ -1656,6 +1822,7 @@ class LoopSensor(Part):
     quiet = True
     V_MIN = 9.0
     V_MAX = 40.0
+    FAULTS = (("lost", "Signal lost: 0 mA"), ("full", "Reads full scale"), ("frozen", "Stuck at this reading"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1668,14 +1835,18 @@ class LoopSensor(Part):
         self.region = -1
 
     def sense(self, dt):
+        if self.fault == "frozen":
+            return
         f = self.reader.fraction(self.par["lo"], self.par["hi"]) if self.reader is not None else \
             clamp(self.par.get("manual", 0.0) / 100.0, 0.0, 1.0)
+        if self.fault == "full":
+            f = 1.0
         if abs(f - self.frac) > 2e-4:
             self.frac = f
             self.net.dirty = True
 
     def amps(self):
-        return 0.004 + 0.016 * self.frac
+        return 0.0 if self.fault == "lost" else 0.004 + 0.016 * self.frac
 
     def stamp(self, s):
         a, b = self.t["+"], self.t["-"]
@@ -1723,19 +1894,25 @@ class Load(Part):
     ON_WORD = "On"
     OFF_WORD = "Off"
     ON_AT = 0.5
+    FAULTS = (("open", "Burnt out"), ("shorted", "Short circuit"))
 
     def rated(self):
         return self.par.get("rated") or self.net.nominal(self.t[self.names[0]])
 
     def g(self):
+        if self.fault in ("open", "shorted"):
+            return 0.0 if self.fault == "open" else G_CLOSED
         r = max(self.rated(), 1e-3)
-        return self.par["power"] / (r * r)
+        return self.watts() / (r * r)
+
+    def watts(self):
+        return self.par["power"]
 
     def current_lines(self):
         return [(self.names[0], self.names[1], self.g(), 0.0)]
 
     def is_on(self):
-        return mag(self.across()) >= self.ON_AT * self.rated()
+        return self.fault != "open" and mag(self.across()) >= self.ON_AT * self.rated()
 
     def status(self, p=None):
         return self.ON_WORD if self.is_on() else self.OFF_WORD
@@ -1787,6 +1964,7 @@ class ElectricMotor(_Shaft, Load):
     """Runs from 70% of its voltage. Its current follows the pump it drives; see _Shaft."""
     ON_WORD = "Running"
     ON_AT = 0.7
+    FAULTS = (("open", "Burnt out"), ("shorted", "Short circuit"), ("seized", "Seized: it draws its stall current"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1796,14 +1974,13 @@ class ElectricMotor(_Shaft, Load):
         self.running = False
         self._reset_shaft()
 
-    def g(self):
-        r = max(self.rated(), 1e-3)
-        return self.shaft_watts() / (r * r)
+    def watts(self):
+        return STALL_CURRENT * self.par["power"] if self.fault == "seized" else self.shaft_watts()
 
     def commit(self, v, dt):
         volts = mag(v[self.t[self.names[0]]] - v[self.t[self.names[1]]])
         r = self.rated()
-        self.running = volts >= (0.5 * r if self.running else 0.7 * r)
+        self.running = not self.fault and volts >= (0.5 * r if self.running else 0.7 * r)
 
     def is_on(self):
         return self.running
@@ -1822,6 +1999,7 @@ class Motor3(_Shaft, Part):
     """Three windings in star. Lose a phase while running and it hums on, drawing more, until something protects it;
     lose one while stopped and it won't start. Swap two phases and it runs the other way."""
     quiet = False
+    FAULTS = (("open", "Burnt out"), ("phase_open", "One winding open"), ("seized", "Seized: it draws its stall current"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1845,17 +2023,24 @@ class Motor3(_Shaft, Part):
 
     def _g(self):
         r = max(self._rated(), 1e-3)
+        if self.fault == "seized":
+            return STALL_CURRENT * self.par["power"] / (r * r)
         g = self.shaft_watts() / (r * r)
         return 2.0 * g if self.lost_phase else g
 
+    def _windings(self):
+        if self.fault == "open":
+            return []
+        return self.names[1:] if self.fault == "phase_open" else self.names
+
     def stamp(self, s):
         g = self._g()
-        for n in self.names:
+        for n in self._windings():
             s.line(self.t[n], self.star, g)
 
     def currents(self, v):
         g = self._g()
-        return {n: g * (v[self.t[n]] - v[self.star]) for n in self.names}
+        return {n: g * (v[self.t[n]] - v[self.star]) for n in self._windings()}
 
     def _phases(self, v):
         return [v[self.t[n]] - v[self.star] for n in self.names]
@@ -1863,13 +2048,16 @@ class Motor3(_Shaft, Part):
     def update(self, v):
         ph = [mag(x) for x in self._phases(v)]
         top = max(ph)
-        lost = top > 1.0 and sum(1 for x in ph if x < 0.2 * top) == 1
+        lost = self.fault == "phase_open" or (top > 1.0 and sum(1 for x in ph if x < 0.2 * top) == 1)
         if lost != self.lost_phase:
             self.lost_phase = lost
             return True
         return False
 
     def commit(self, v, dt):
+        if self.fault in ("open", "seized"):
+            self.running = False
+            return
         ph = self._phases(v)
         sizes = [mag(x) for x in ph]
         lo = 0.7 * self._rated() / math.sqrt(3.0)
@@ -1883,8 +2071,11 @@ class Motor3(_Shaft, Part):
         if self.running and not self.lost_phase and sizes[0] > 1.0 and sizes[1] > 1.0:
             self.rev = cmath.phase(complex(ph[0]) / complex(ph[1])) < 0 if isinstance(ph[0], complex) else False
 
+    def _biggest_current(self) -> float:
+        return max((mag(i) for i in self.currents(self.net.v).values()), default=0.0)
+
     def badge(self, un):
-        return un.fmt("current", max(mag(i) for i in self.currents(self.net.v).values())) if self.running or self.lost_phase else ""
+        return un.fmt("current", self._biggest_current()) if self.running or self.lost_phase else ""
 
     def status(self, p=None):
         if self.lost_phase:
@@ -1901,13 +2092,13 @@ class Motor3(_Shaft, Part):
 
     def readings(self, p=None):
         v = self.net.v
-        amps = max(mag(i) for i in self.currents(v).values())
+        amps = self._biggest_current()
         line = mag(v[self.t[self.names[0]]] - v[self.t[self.names[1]]])
         return [("Line voltage", "voltage", line), ("Line current", "current", amps), ("Power", "power", self.shaft_watts() if self.running else 0.0)]
 
     def trace_channels(self):
         return [self._state_channel("running"),
-                ((self.part.key, "i"), f"{self.part.tag} current", "current", lambda: max(mag(i) for i in self.currents(self.net.v).values()))]
+                ((self.part.key, "i"), f"{self.part.tag} current", "current", self._biggest_current)]
 
 
 class MeterV(Part):
@@ -1955,6 +2146,7 @@ class Coil(Load):
     voltage is the valve's command, and it's an amplifier's input rather than a winding."""
     quiet = False
     PROPORTIONAL_DEFAULT = 10.0
+    FAULTS = (("open", "Burnt out"), ("shorted", "Short circuit"), ("stuck_in", "Stuck pulled in"), ("stuck_out", "Won't pull in"))
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -1978,7 +2170,7 @@ class Coil(Load):
         return self.net.nominal(self.t[self.names[0]])
 
     def g(self):
-        if self.proportional:
+        if self.proportional and self.fault not in ("open", "shorted"):
             return 1e-4
         return super().g()
 
@@ -1994,6 +2186,8 @@ class Coil(Load):
         return mag(v[self.t[a]] - v[self.t[b]])
 
     def wants_flip(self, v) -> bool:
+        if self.fault:
+            return self.energised != (self.fault == "stuck_in")
         x = self.volts(v)
         r = self.rated()
         if self.proportional:
@@ -2018,6 +2212,8 @@ class Coil(Load):
         self.timer = 0.0
 
     def fraction(self) -> float:
+        if self.fault:
+            return 1.0 if self.fault == "stuck_in" else 0.0
         return clamp(self.volts(self.net.v) / max(self.rated(), 1e-6), 0.0, 1.0)
 
     def commit(self, v, dt):
@@ -2165,7 +2361,23 @@ class Plc(Part):
         return signed(v[self.t["L+"]] - v[self.t["M"]])
 
     def running(self) -> bool:
-        return self.powered and self.switch_run and self.rt.running
+        return self.powered and self.switch_run and self.rt.running and self.fault != "stop"
+
+    def fault_choices(self):
+        out = [("stop", "CPU stopped: outputs off")]
+        for a in self.addr["do"]:
+            out += [(f"{a}_on", f"Output {a} stuck on"), (f"{a}_off", f"Output {a} stuck off")]
+        for a in self.addr["di"]:
+            out += [(f"{a}_on", f"Input {a} stuck on"), (f"{a}_off", f"Input {a} stuck off")]
+        for a in self.addr["ai"]:
+            out.append((f"{a}_lost", f"Input {a} reads zero"))
+        return out
+
+    def _fault_on(self, addr):
+        """What a fault says this input or output is: True, False, or None if it has nothing to do with it."""
+        if not self.fault or self.fault == "stop" or self.fault.rpartition("_")[0] != addr:
+            return None
+        return self.fault.endswith("_on")
 
     def current_lines(self):
         m = "M"
@@ -2242,9 +2454,14 @@ class Plc(Part):
                 self.inputs[a] = True
             elif x <= off:
                 self.inputs[a] = False
+            forced = self._fault_on(a)
+            if forced is not None:
+                self.inputs[a] = forced
             self.rt.set_input(a, self.inputs[a])
         for a in self.addr["ai"]:
             x = (v[self.t[a]] - v[self.t["M"]]).real
+            if self._fault_on(a) is not None:
+                x = 0.0
             self.rt.set_analog_raw(a, x / R_AI_MA * 1000.0 if self.ai_ma[a] else x)
 
     def _write_outputs(self):
@@ -2253,6 +2470,9 @@ class Plc(Part):
         G = rt.ctx.G
         for a in self.addr["do"]:
             want = run and bool(G.get(a))
+            forced = self._fault_on(a)
+            if forced is not None:
+                want = forced and self.powered
             if want != self.outs[a]:
                 self.outs[a] = want
                 self.net.dirty = True
@@ -2449,6 +2669,9 @@ class Network:
         self._nominal = None
         self._solves = 0
         self.parts = list(self.by_key.values())
+        self.broken = set()     # (sheet uid, wire id) of wires failed on purpose
+        self._drawn_terms = dict(circuit.el_term_nodes)
+        self._drawn_wires = dict(circuit.el_wire_nodes)
         self.nonlinear = [b for b in self.parts if type(b).update is not Part.update]
         self.committing = [b for b in self.parts if type(b).commit is not Part.commit]
         self.logic = [b for b in self.parts if isinstance(b, Logic)]
@@ -2462,6 +2685,7 @@ class Network:
         # odd, so that logic oscillating every round is seen to oscillate rather than looking still at every step's end
         self._rounds = 2 * len(self.coils) + 2 * len(self.logic) + 9
         self._oscillation_said = False
+        self._whole_count = self.node_count
         self.what_if = False    # relays are being tried in another order: nothing that happens now is real
         self.races = []         # (time, the relay that went first, the one it raced), as found
         self._race_pairs = set()
@@ -2491,7 +2715,7 @@ class Network:
             elif link.kind == "contact" and dst is not None:
                 dst.follows = (lambda c=src: c.is_actuated)
             elif link.kind == "overload" and dst is not None:
-                dst.follows = (lambda c=src: c.tripped)
+                dst.follows = (lambda c=src: c.is_tripped())
                 self.sensing.append(dst)
             elif link.kind == "pressure" and dst is not None:
                 dst.follows = (lambda c=fluid[link.source]: c.on)
@@ -2509,6 +2733,37 @@ class Network:
         for b in self.parts:
             if isinstance(b, (AnalogSensor, LoopSensor)) and b not in self.sensing:
                 self.sensing.append(b)
+
+    # ---- wires failed on purpose
+    def set_broken(self, broken):
+        """Take these wires out of the circuit, while it runs. What's still joined keeps its node; what came apart gets a new one."""
+        c = self.circuit
+        self.broken = set(broken)
+        self.node_count = self._whole_count
+        c.el_term_nodes.update(self._drawn_terms)
+        c.el_wire_nodes.clear()
+        c.el_wire_nodes.update(self._drawn_wires)
+        for ref in self.broken:
+            c.el_wire_nodes.pop(ref, None)
+        if self.broken:
+            for old, pieces in split_nets(c, self.broken, self._drawn_terms, self._drawn_wires):
+                for terms, wires in pieces[1:]:
+                    node = self.new_node()
+                    c.el_circuit_of[node] = c.el_circuit_of.get(old)
+                    for ref in terms:
+                        c.el_term_nodes[ref] = node
+                    for ref in wires:
+                        c.el_wire_nodes[ref] = node
+        for b in self.parts:
+            for name in b.names:
+                b.t[name] = c.el_term_nodes[(b.part.sheet, b.part.comp.id, name)]
+        self.free = [n for n in range(self.node_count) if n not in c.el_fixed]
+        self.idx = [None] * self.node_count
+        for i, n in enumerate(self.free):
+            self.idx[n] = i
+        self.n_free = len(self.free)
+        self.v = (list(self.v) + [0.0] * self.node_count)[:self.node_count]
+        self.touch()
 
     # ---- voltages the parts ask about
     def _source_nominals(self) -> dict:

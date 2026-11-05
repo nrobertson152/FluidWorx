@@ -25,5 +25,8 @@ First version.
   powered from its own wires, with live inputs, outputs and variables.
 - Wires coloured by voltage, current along the real paths, contacts drawn as they are now, a Links tab, on/off signals on the trace,
   and supply and protection tables in the report. Study files are format 2 only if they hold links.
+- Fail a part or a line on purpose, while it runs, to see what the rest of the machine does: stuck contacts, burnt-out coils, broken wires, sensors reading
+  zero, seized cylinders, stuck spools, burst lines and PLC inputs and outputs. It's marked on the drawing, counted in the status bar and listed in the report,
+  which says it isn't a failure analysis.
 - Says when relays race: when another order would leave them differently, the first drawn won only because it was drawn first, and a
   real machine could go either way.

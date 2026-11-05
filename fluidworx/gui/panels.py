@@ -161,6 +161,7 @@ class Inspector(ScrollFrame):
         if isinstance(b, electric.Plc):
             self._plc_section(b)
         self._links_section(part)
+        self._fault_section(b, key)
         defs = catalog.PARAMS.get(part.kind, [])
         if part.kind == "rail" and not any(part.key in r[3] for r in app.circuit.el_rails):
             defs = []       # what feeds this line is drawn, or it's 0 V: its label is only a name
@@ -179,6 +180,22 @@ class Inspector(ScrollFrame):
             s4.pack(fill="x")
             s4.add_full(ttk.Label(s4.body, text=note, style="Warning.TLabel", wraplength=250, justify="left"))
         self.refresh()
+
+    def _fault_section(self, b, key):
+        """Fail it on purpose, to see what the rest of the machine does about it."""
+        choices = b.fault_choices()
+        if not choices:
+            return
+        sec = Section(self.inner, "What if it fails")
+        sec.pack(fill="x")
+        labels = [WORKING] + [label for _id, label in choices]
+        ids = {label: name for name, label in choices}
+        var = tk.StringVar(value=b.fault_name() or WORKING)
+        cb = ttk.Combobox(sec.body, textvariable=var, values=labels, state="readonly")
+        cb.bind("<<ComboboxSelected>>", lambda e: self.app.set_fault(key, ids.get(var.get())))
+        sec.add_full(cb)
+        sec.add_full(ttk.Label(sec.body, text="Takes effect now, and stays through a reset until you put it right. It isn't saved with the study.",
+                               style="Faint.TLabel", wraplength=250, justify="left"), pady=(4, 0))
 
     def _plc_section(self, b):
         """Its inputs, outputs and variables as they are right now."""
@@ -588,7 +605,8 @@ def _floor(x):
     return math.floor(x + 1e-9)
 
 
-WARNING_EVENTS = ("Race:",)
+WARNING_EVENTS = ("Race:", "Failed on purpose")
+WORKING = "Working"
 
 
 class EventsPanel(ttk.Frame):
@@ -658,6 +676,64 @@ class LinksPanel(ttk.Frame):
         sel = self.tree.selection()
         if sel and self._map.get(sel[0]):
             self.app.select(self._map[sel[0]], reveal=True)
+
+
+class FaultsPanel(ttk.Frame):
+    """Everything failed on purpose, so that nobody reads a result without knowing."""
+    NOTE = ("What the rest of the machine does when these fail, in this simplified model. It's a way of asking questions, "
+            "not a failure analysis: it doesn't show that a machine is safe, or that a safety function works.")
+
+    def __init__(self, master, app):
+        super().__init__(master, style="Surface.TFrame")
+        self.app = app
+        bar = ttk.Frame(self, style="Surface.TFrame", padding=(8, 6))
+        bar.pack(fill="x")
+        self.put_right = ttk.Button(bar, text="Put right", command=self._put_right)
+        self.put_right.pack(side="left")
+        self.put_all_right = ttk.Button(bar, text="Put everything right", command=self._put_all_right)
+        self.put_all_right.pack(side="left", padx=(4, 12))
+        note = ttk.Label(bar, text=self.NOTE, style="Faint.TLabel", wraplength=500, justify="left")
+        note.pack(side="left", fill="x", expand=True)
+        note.bind("<Configure>", lambda e: note.configure(wraplength=max(200, e.width - 8)))
+        holder = ttk.Frame(self, style="Surface.TFrame")
+        holder.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(holder, columns=("what", "fault"), show="headings", selectmode="browse")
+        self.tree.heading("what", text="Part or line", anchor="w")
+        self.tree.heading("fault", text="Failed on purpose", anchor="w")
+        self.tree.column("what", width=220, stretch=False)
+        self.tree.column("fault", width=500, stretch=True)
+        self.tree.pack(side="left", fill="both", expand=True)
+        _scroll(holder, self.tree).pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self._pick)
+        self._map = {}
+
+    def rebuild(self):
+        self.tree.delete(*self.tree.get_children())
+        self._map = {}
+        sim = self.app.sim
+        rows = sim.fault_rows() if sim is not None else []
+        for ref, what, fault in rows:
+            self._map[self.tree.insert("", "end", values=(what, fault))] = ref
+        if not rows:
+            self.tree.insert("", "end", values=("Nothing", "Right-click a part or a line, or use Properties, to fail it on purpose."))
+        state = "normal" if rows else "disabled"
+        self.put_right.configure(state=state)
+        self.put_all_right.configure(state=state)
+
+    def _put_right(self):
+        sel = self.tree.selection()
+        ref = self._map.get(sel[0]) if sel else None
+        if ref is not None:
+            self.app.put_right(ref)
+
+    def _put_all_right(self):
+        self.app.put_everything_right()
+
+    def _pick(self, _e):
+        sel = self.tree.selection()
+        ref = self._map.get(sel[0]) if sel else None
+        if ref is not None and self.app.sim is not None and ref in self.app.sim.faults:
+            self.app.select(ref, reveal=True)
 
 
 class ChecksPanel(ttk.Frame):

@@ -251,6 +251,12 @@ def html_report(study, circuit, sim, units: Units, doc, title: str = "") -> str:
                 f"{e(units.fmt('pressure', sim.max_pressure()))}"
                 + (", and voltage, from blue at 0 V to red at the full voltage of that circuit" if circuit.electrical_parts else "")
                 + ". Parts are drawn in their rest positions; their state is listed below.</p>"]
+    failed = sim.fault_rows()
+    if failed:
+        sections.insert(3, '<h2>Failed on purpose</h2><p class="note">Everything below is with these failed on purpose: it shows what the rest of '
+                           "the machine does about it, in this simplified model. It isn't a failure analysis, and it doesn't show that a machine "
+                           "is safe or that a safety function works.</p><table><tr><th>Part or line</th><th>Fault</th></tr>"
+                           + "".join(f"<tr><td>{e(what)}</td><td>{e(fault)}</td></tr>" for _ref, what, fault in failed) + "</table>")
     if circuit.electrical_parts:
         sections.append('<p class="note">Electrical results are logic and approximate loads: AC is carried at its RMS value, '
                         "with no waveforms, and contacts and relays act instantly. Fuse and breaker times are indicative. "

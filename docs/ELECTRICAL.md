@@ -141,6 +141,43 @@ chattering. Logic that oscillates carries on and says so.
 | Label: `7805` | Regulator voltage |
 | Label: `0-250 bar`, `0-300 mm`, `4-20 mA`, `0-10 V` | Analog sensor range and output |
 
+## Failing a part on purpose
+
+To see what the rest of the machine does when something goes wrong, right-click a part and choose **What if it fails**, or use the same
+list in Properties. It takes effect at once, with the machine running or paused.
+
+| Part | What can go wrong |
+|---|---|
+| Contact, switch, push-button, limit switch | Stuck open, stuck closed (welded) |
+| Coil, relay, solenoid | Burnt out, short circuit, stuck pulled in, won't pull in |
+| Proximity sensor | Output stuck off or on |
+| Analog sensor | Signal lost (0 V or 0 mA), reads full scale, stuck at this reading |
+| Fuse, breaker | Blown or failed open, won't trip |
+| Overload | Tripped, won't trip |
+| Motor | Burnt out, short circuit, seized (six times its rating in current), or one winding open on three-phase |
+| PLC | CPU stopped, an output stuck on or off, an input stuck on or off, an analog input reading zero |
+| Lamp, sounder | Burnt out, short circuit |
+| Supply, regulator, rectifier, transformer | No output |
+| Resistor, capacitor, inductor, diode, transistor | Open, short |
+| Valve | Spool stuck where it is |
+| Relief, sequence, reducing, unloading, check, flow control | Stuck closed, stuck open |
+| Pump | No output |
+| Cylinder, motor | Seized, seal leaking |
+| Accumulator | Lost its gas |
+| Pressure switch | Stuck off or on |
+
+**Right-click a line** to fail that too. A wire breaks, and whatever was joined only through it comes apart: the far side goes dead, and on a
+branching line only the part beyond the break does. Names still join, so a `+24V` at both ends of a broken wire is still one line. A pipe
+bursts: that whole line is open to the air or the tank, on both sides of the break.
+
+Failed parts are marked on the drawing, the status bar counts them, the **Faults** tab lists them and can put them right, and the report
+says so at the top. A fault stays through a reset, so a machine can be run from the start with it. It isn't saved with the study. To keep
+one, make it part of a test scenario.
+
+This shows what this simplified model does. **It isn't a failure analysis or an FMEA**, and a machine that stops here hasn't been shown to be
+safe. It tries the failures you think of, one choice per part, and the model's limits still apply: a stuck spool here has no partial
+travel, and a contact that welds here welds all its poles.
+
 ## Results for checking a design
 
 The report has a **Supplies** table (peak current so far, against the limit and against everything connected) and a **Protection** table (peak
@@ -156,7 +193,8 @@ plotted on the Trace tab, and exported.
   link in a chain of PLC, coil and valve.
 - **Motors have no starting current.** They draw their running current from the first moment, and take no time to run up.
 - **Three AC sources drawn separately are in phase here.** For three phases, label the lines `L1`, `L2` and `L3`.
-- **Nothing is destroyed.** Over-voltage is reported, but coils don't burn out, and a PLC output carrying too much carries on.
+- **Nothing is destroyed on its own.** Over-voltage is reported, but coils don't burn out, and a PLC output carrying too much carries on. You can fail
+  them on purpose: see above.
 - **Wires have no resistance**, so there's no voltage drop along them, and no fault current calculation beyond what the source's small
   resistance gives. Fuse and breaker times are indicative, not curves. **This is not a protection study.**
 - **It doesn't check wiring against a standard**, and it doesn't show that a machine is safe. An E-stop that works here is not a safety function.
