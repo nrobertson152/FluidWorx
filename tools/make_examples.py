@@ -303,7 +303,7 @@ def plc_cylinder():
     b = B("PLC running a cylinder, with position and pressure feedback")
     _cyl, v, _pump = cylinder_sheet(b, "Y1")
     ax = v.terminals()["A"][0]
-    pt_h = b.part("fl.hyd.pressure.transducer", 620, 290, "PT1", "0-250 bar")
+    pt_h = b.part("fl.hyd.pressure.transducer", 620, 290, "PT1")
     b.tee(pt_h, "P", (ax, 340), via=[(620, 340)])
     b.sheet("Control")
     psu = b.part("el.psu", 170, 365, "G1", "24 V 5 A")

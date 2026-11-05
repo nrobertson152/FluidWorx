@@ -146,3 +146,40 @@ def test_flow_direction_runs_from_pump_to_valve():
 
 
 assert EXAMPLES
+
+
+def _example_paths(name, electric):
+    c = load(name)
+    sim = engine.Simulator(c)
+    return c, sim, FlowPaths(c, electric=electric)
+
+
+def test_current_follows_the_real_path_along_the_wires():
+    """Across each joint on a line, the current is what the parts there take. A lit lamp's wire carries the lamp's current;
+    the wire to an open contact carries nothing."""
+    c, sim, paths = _example_paths("relay_latch.schematix", True)
+    sim.run(0.1)
+    start = next(b for b in sim.parts.values() if b.part.tag == "S1")
+    sim.command(start.part.key, "press")
+    sim.run(0.1)
+    sim.command(start.part.key, "release")
+    sim.run(0.1)
+    flows = paths.compute(sim.net.terminal_currents())
+    lamp = next(b for b in sim.parts.values() if b.part.tag == "H1")
+    assert lamp.is_on()
+    by_wire = {}
+    for i, seg in enumerate(paths.segments):
+        by_wire[seg[1]] = max(by_wire.get(seg[1], 0.0), abs(flows[i]))
+    doc = lamp.part.comp
+    into_lamp = next(w for w in c.project.find_sheet(lamp.part.sheet).wires.values() if w.end and w.end[0] == doc.id)
+    assert by_wire[into_lamp.id] == pytest.approx(lamp.through(), rel=0.02)
+    open_contact = next(b for b in sim.parts.values() if b.part.tag == "K1" and b.part.kind == "contact" and b.nc)
+    out_of_it = next(w for w in c.project.find_sheet(open_contact.part.sheet).wires.values() if w.start and w.start[0] == open_contact.part.comp.id)
+    assert by_wire[out_of_it.id] < 1e-6
+
+
+def test_fluid_paths_are_unchanged_by_an_electrical_sheet():
+    c, sim, paths = _example_paths("plc_cylinder.schematix", False)
+    assert paths.segments and all(c.wire_nodes.get((s[0], s[1])) == s[4] for s in paths.segments)
+    electric_paths = FlowPaths(c, electric=True)
+    assert electric_paths.segments and not ({(s[0], s[1]) for s in paths.segments} & {(s[0], s[1]) for s in electric_paths.segments})

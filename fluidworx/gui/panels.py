@@ -17,7 +17,7 @@ GROUPS = [("Supply", ("pump", "pump_pc", "compressor")),
           ("Storage", ("accumulator", "receiver")),
           ("Instruments", ("gauge", "pressure_switch")),
           ("PLC", ("plc",)),
-          ("Electrical supply", ("source_v", "source_i", "psu", "rectifier", "regulator", "transformer", "autotransformer")),
+          ("Power", ("source_v", "source_i", "psu", "rectifier", "regulator", "transformer", "autotransformer")),
           ("Protection", ("fuse", "breaker", "breaker3", "overload")),
           ("Switches", ("button", "selector", "changeover", "selector4", "switch_manual")),
           ("Sensors", ("limit", "pressure_contact", "prox", "sensor_analog", "sensor_loop")),
@@ -162,6 +162,8 @@ class Inspector(ScrollFrame):
             self._plc_section(b)
         self._links_section(part)
         defs = catalog.PARAMS.get(part.kind, [])
+        if part.kind == "rail" and not any(part.key in r[3] for r in app.circuit.el_rails):
+            defs = []       # what feeds this line is drawn, or it's 0 V: its label is only a name
         if defs:
             s3 = Section(self.inner, "Parameters")
             s3.pack(fill="x")
@@ -417,7 +419,7 @@ class TracePanel(ttk.Frame):
         for i in sorted(self.enabled):
             lanes.setdefault(tr.channels[i][2], []).append(i)
         order = [q for q in LANE_ORDER if q in lanes]
-        ml, mr, mt, mb = 62, 82, 8, 22
+        ml, mr, mt, mb = 62, (130 if "state" in lanes else 82), 8, 22
         # on/off signals are read side by side, so they get the room they need and the other lanes share the rest
         room = H - mt - mb
         state_h = min(room * 0.7, 24 + 15 * len(lanes["state"])) if "state" in lanes else 0.0
@@ -448,7 +450,7 @@ class TracePanel(ttk.Frame):
             if hi - lo < 1e-9:
                 hi = lo + 1.0
             hi_d, lo_d = un.from_si(q, hi), un.from_si(q, lo)
-            step = _nice((hi_d - lo_d) / 2.5)
+            step = _nice((hi_d - lo_d) / (2.5 if y1 - y0 >= 44 else 1.0))     # in a short lane, the two ends are enough
             top = step * _ceil(hi_d / step)
             bot = step * _floor(lo_d / step)
             sx = lambda x: ml + (x - t0) / max(t1 - t0, 1e-6) * (W - ml - mr)  # noqa: E731

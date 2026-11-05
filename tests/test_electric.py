@@ -149,6 +149,25 @@ def test_supply_lines_with_the_same_name_are_one_line():
     assert not sim.circuit.el_rails, "the source feeds it, so no line is live merely because of its label"
 
 
+def test_a_study_can_change_a_live_lines_voltage_from_any_symbol_on_it():
+    """What does it do on 17 V? Two rails on one line, with the change made on the second."""
+    d = Drawing()
+    p1, p2, n = d.add("el.rail.pos", "", "+24V"), d.add("el.rail.pos", "", "24V"), d.add("el.rail.neg", "", "0V")
+    coil, lamp = d.add("el.coil.iec", "K1", "24 V 4 W"), d.add("el.lamp.iec", "H1", "24 V 2 W")
+    d.wire((p1, "1"), (coil, "A1"))
+    d.wire((coil, "A2"), (n, "1"))
+    d.wire((p2, "1"), (lamp, "1"))
+    d.wire((lamp, "2"), (n, "1"))
+    sim = d.sim()
+    sim.run(0.02)
+    assert part(sim, coil).energised
+    part(sim, p2).par["voltage"] = 8.0
+    sim.touch()
+    sim.run(0.02)
+    assert not part(sim, coil).energised, "below its 40% it lets go"
+    assert diff(sim, coil, "A1", "A2") == pytest.approx(8.0, abs=0.01)
+
+
 def test_a_label_does_not_override_what_really_feeds_a_line():
     d = Drawing()
     src = d.add("el.source.dc", "G1", "12 V")
@@ -1130,3 +1149,39 @@ def test_big_circuit_stays_quick_enough_to_run_live():
     sim.run(1.0)
     assert time.perf_counter() - t0 < 1.0, "a settled network costs almost nothing"
     assert first < 5.0, "and even everything changing at once is a moment"
+
+
+@pytest.mark.parametrize("symbol,label", [("el.resistor.iec", "0 ohm"), ("el.coil.iec", "0 V 0 W"), ("el.lamp.iec", "0 W"), ("el.fuse.iec", "0 A"),
+                                          ("el.transformer", "0/0 V"), ("el.capacitor", "0 uF"), ("el.inductor", "0 mH"), ("el.psu", "0 V 0 A"),
+                                          ("el.regulator", "0 V"), ("el.diode.zener", "0 V"), ("el.source.dc", "0 V"), ("el.motor", "0 V 0 W")])
+def test_a_label_saying_zero_divides_nothing(symbol, label):
+    d = Drawing()
+    src, c = d.add("el.source.dc", "G1", "24 V"), d.add(symbol, "X1", label)
+    names = [t.name for t in c.terminal_defs()]
+    d.wire((src, "+"), (c, names[0]))
+    d.wire((c, names[1]), (src, "-"))
+    sim = d.sim()
+    sim.run(0.05)
+    assert all(math.isfinite(abs(x)) for x in sim.net.v)
+    part(sim, c).readings()
+
+
+def test_a_study_file_saying_zero_divides_nothing():
+    from fluidworx import circuit
+    d = Drawing()
+    src, r = d.add("el.source.dc", "G1", "24 V"), d.add("el.resistor.iec", "R1", "1k")
+    d.wire((src, "+"), (r, "1"))
+    d.wire((r, "2"), (src, "-"))
+    c = d.build()
+    circuit.apply_study_params(c, {f"{p.key[0]}/{p.key[1]}": {"ohms": 0.0, "rint": 0.0} for p in c.parts})
+    from fluidworx import engine
+    sim = engine.Simulator(c)
+    sim.run(0.02)
+    assert all(math.isfinite(abs(x)) for x in sim.net.v)
+
+
+def test_a_line_joining_the_two_sides_is_reported():
+    d = Drawing()
+    tank, coil = d.add("fl.hyd.tank", "Z1"), d.add("el.coil.iec", "K1")
+    d.wire((tank, "T"), (coil, "A1"))
+    assert any("joins a fluid port" in i.text for i in d.build().issues)

@@ -330,6 +330,45 @@ def test_threshold_on_pressure():
     assert part(sim, lamp).is_on()
 
 
+def test_threshold_on_a_motors_speed():
+    d = Drawing(sheets=2)
+    pump, tank, motor, t2 = d.add("fl.hyd.pump", "P1", "10 L/min"), d.add("fl.hyd.tank", "Z1"), d.add("fl.hyd.motor", "M9", "25 cc/rev"), d.add("fl.hyd.tank", "Z2")
+    names = [t.name for t in motor.terminal_defs()]
+    d.wire((pump, "S"), (tank, "T"))
+    d.wire((pump, "P"), (motor, names[0]))
+    d.wire((motor, names[1]), (t2, "T"))
+    pos, neg = rails(d, 1)
+    s, lamp = d.add("el.switch.limit.no", "S1", sheet=1, props={"Senses": "M9 > 300 rpm"}), d.add("el.lamp.iec", "H1", sheet=1)
+    d.wire((pos, "1"), (s, "1"))
+    d.wire((s, "2"), (lamp, "1"))
+    d.wire((lamp, "2"), (neg, "1"))
+    sim = d.sim()
+    sim.run(1.0)
+    b = part(sim, motor)
+    assert abs(b.v) * 60 / (2 * 3.14159) == pytest.approx(400.0, rel=0.05), "10 L/min through 25 cc/rev is 400 rpm"
+    assert part(sim, lamp).is_on()
+
+
+def test_a_position_on_a_motor_that_turns_without_end_is_reported():
+    d = Drawing()
+    d.add("fl.hyd.motor", "M9", "25 cc/rev")
+    d.add("el.switch.limit.no", "S1", props={"Senses": "M9 100%"})
+    c = d.build()
+    assert any("turns without end" in i.text for i in c.issues) and not c.links
+
+
+def test_a_pressure_switch_contact_can_read_a_gauge_instead():
+    d, sw, _limit, lamp, cyl = limit_rig("PT1 > 80 bar", "el.switch.pressure.no")
+    sim = d.sim()
+    sim.run(0.02)
+    sim.command(part(sim, sw).part.key, "toggle")
+    extend_until(sim, cyl, 0.1)
+    sim.run(0.02)
+    assert not part(sim, lamp).is_on()
+    sim.run(4.0)
+    assert part(sim, lamp).is_on()
+
+
 def test_a_sensor_naming_a_tag_nothing_has_is_reported():
     d = Drawing()
     limit = d.add("el.switch.limit.no", "S2", props={"Senses": "A9 100%"})
@@ -805,6 +844,55 @@ def test_too_much_on_a_plc_output_is_reported():
     sim.run(0.1)
     assert any("Q0 is carrying 0.83 A" in text for _t, _tag, text in sim.events)
     assert part(sim, r["plc"]).peak["Q0"] == pytest.approx(20.0 / 24.0, abs=0.01)
+
+
+@pytest.mark.parametrize("bad", [None, 1, "x", [], {"pous": 1}, {"pous": []}, {"pous": [1]}, {"pous": [{"lang": "cobol"}]},
+                                 {"pous": [{"name": "A", "lang": "st", "source": 5}]}, {"scan_ms": "fast"}, {"io": 5}, {"vars": [1]}])
+def test_a_damaged_program_never_stops_the_simulation(bad):
+    d, r = plc_rig({**plc_core.default_params(), "program": bad})
+    sim = d.sim()
+    sim.run(0.05)
+    press(sim, r["start"], 0.02)
+    part(sim, r["plc"]).status()
+    part(sim, r["plc"]).watch()
+
+
+@pytest.mark.parametrize("params", [{"di": "many"}, {"di": 500, "do": -3, "ai": None}, {"do_type": "steam"}, {"tags": 5}])
+def test_a_damaged_block_never_stops_the_simulation(params):
+    d = Drawing()
+    src, plc_ = d.add("el.source.dc", "G1", "24 V"), d.add("el.plc", "PLC1", params=params)
+    d.wire((src, "+"), (plc_, "L+"))
+    d.wire((src, "-"), (plc_, "M"))
+    sim = d.sim()
+    sim.run(0.05)
+    assert part(sim, plc_).status() == "Run"
+
+
+def test_plc_comes_back_set_to_run_after_a_reset():
+    d, r = plc_rig()
+    sim = d.sim()
+    sim.run(0.05)
+    b = part(sim, r["plc"])
+    sim.command(b.part.key, "toggle")
+    sim.run(0.05)
+    assert b.status() == "Stop"
+    sim.reset()
+    sim.run(0.05)
+    assert b.status() == "Run"
+
+
+def test_a_plc_on_a_dc_circuit_in_a_drawing_with_three_phases_still_knows_its_polarity():
+    d = Drawing()
+    src, plc_ = d.add("el.source.dc", "G1", "24 V"), d.add("el.plc", "PLC1", params=plc_core.default_params())
+    d.wire((src, "-"), (plc_, "L+"))
+    d.wire((src, "+"), (plc_, "M"))
+    motor = d.add("el.motor.3ph", "M1", "1 kW")
+    for name, pin in (("L1", "U1"), ("L2", "V1"), ("L3", "W1")):
+        d.wire((d.add("el.rail.pos", "", name), "1"), (motor, pin))
+    sim = d.sim()
+    sim.run(0.05)
+    assert part(sim, motor).running
+    assert part(sim, plc_).status() == "Supply the wrong way round"
 
 
 def test_plc_input_draws_about_7_ma():

@@ -23,6 +23,7 @@ import cmath
 import math
 import re
 
+from .catalog import SENSOR_SIGNALS
 from .linsolve import System, solve
 from .vendor.openschematix import plc as plc_core
 
@@ -47,8 +48,11 @@ def mag(x) -> float:
 
 
 def signed(x) -> float:
-    """A voltage to show with its sign: a DC value as it is, a phasor by its size."""
-    return x if not isinstance(x, complex) else abs(x)
+    """A voltage to show with its sign: a DC value as it is, a phasor by its size. A DC circuit tied to one by a shared
+    earth comes back complex with nothing imaginary about it, and is still DC."""
+    if not isinstance(x, complex):
+        return x
+    return x.real if abs(x.imag) < 1e-6 else abs(x)
 
 
 def clamp(x, lo, hi):
@@ -1544,7 +1548,6 @@ SIGNALS = {"0-10V": ("V", 0.0, 10.0), "0-5V": ("V", 0.0, 5.0), "4-20mA": ("A", 0
 
 
 def _signal_name(par):
-    from .catalog import SENSOR_SIGNALS
     return SENSOR_SIGNALS[int(clamp(par.get("signal", 0.0), 0, len(SENSOR_SIGNALS) - 1))]
 
 
@@ -2098,10 +2101,10 @@ class Plc(Part):
         self.ai_ma = {a: self.rt._ai[a][0].endswith("mA") for a in self.addr["ai"]}
         self.ao_ma = {a: self.rt._ao[a][0].endswith("mA") for a in self.addr["ao"]}
         self.has_supply = not ("L+" in part.open_terms and "M" in part.open_terms)
-        self.switch_run = True
         self.reset()
 
     def reset(self):
+        self.switch_run = True
         self.powered = False
         self.acc = 0.0
         self.inputs = {a: False for a in self.addr["di"]}
@@ -2119,8 +2122,7 @@ class Plc(Part):
 
     def _supply(self, v):
         """L+ above M. The wrong way round is no supply at all, as it is for a real PLC."""
-        d = v[self.t["L+"]] - v[self.t["M"]]
-        return abs(d) if isinstance(d, complex) else d
+        return signed(v[self.t["L+"]] - v[self.t["M"]])
 
     def running(self) -> bool:
         return self.powered and self.switch_run and self.rt.running
@@ -2437,8 +2439,8 @@ class Network:
         def note(node, volts):
             if node in c and volts:
                 out[c[node]] = max(out.get(c[node], 0.0), abs(volts))
-        for node, value, _label, key in self.circuit.el_rails:
-            note(node, self._rail_value(value, key))
+        for node, value, _label, keys in self.circuit.el_rails:
+            note(node, self._rail_value(value, keys))
         for _round in range(3):         # a supply fed from another supply's circuit
             for b in self.parts:
                 kind = b.part.kind
@@ -2465,16 +2467,14 @@ class Network:
         regs = [b.par["voltage"] for b in self.parts if b.part.kind == "regulator" and c.get(b.t["OUT"]) == here]
         return min(regs) if regs else self.nominal(node)
 
-    def _rail_value(self, value, key):
-        b = self.by_key.get(key) if key is not None else None
-        if b is None:
-            return value
-        set_to = b.par.get("voltage")
-        if set_to is None:
-            return value
-        if isinstance(value, complex):
-            return value / abs(value) * set_to if abs(value) else value
-        return set_to
+    def _rail_value(self, value, keys):
+        """What a live line is at: what its label says, or what a study has set on any symbol drawn on that line."""
+        for key in keys:
+            b = self.by_key.get(key)
+            if b is not None and b.par.get("voltage") != b.part.base_params.get("voltage"):
+                set_to = b.par["voltage"]
+                return value / abs(value) * set_to if isinstance(value, complex) else set_to
+        return value
 
     def touch(self):
         self.dirty = True
@@ -2485,8 +2485,8 @@ class Network:
         s = System(self)
         for row in range(self.n_free):
             s.rows[row][row] = G_LEAK
-        for node, value, _label, key in self.circuit.el_rails:
-            s.line(node, self.gnd, G_RAIL, self._rail_value(value, key))
+        for node, value, _label, keys in self.circuit.el_rails:
+            s.line(node, self.gnd, G_RAIL, self._rail_value(value, keys))
         for b in self.parts:
             b.stamp(s)
         x = solve(s.rows, s.rhs, [1.0] * len(s.rows))
@@ -2513,7 +2513,8 @@ class Network:
             return
         flipped = set()
         calm = True
-        for _ in range(self._rounds):
+        # logic that oscillates gets what shows it oscillating, and no more: it would otherwise use the whole allowance each step
+        for _ in range(9 if self._oscillation_said else self._rounds):
             calm = self._solve_piecewise()
             logic_moved = False
             for b in self.logic:

@@ -203,3 +203,12 @@ def test_commands_survive_having_no_console(monkeypatch, tmp_path):
     assert cli.main(["--self-test", str(report_path)]) == 0
     assert "PASSED" in report_path.read_text()
     assert cli.main(["--version"]) == 0
+
+
+def test_check_reports_both_sides_and_the_links(capsys, examples_dir):
+    import os
+    from fluidworx import cli
+    assert cli.check(os.path.join(examples_dir, "plc_cylinder.schematix")) == 0
+    out = capsys.readouterr().out
+    assert "fluid parts and" in out and "electrical parts" in out
+    assert "link: Coil Y1a operates the left-hand solenoid of Y1" in out

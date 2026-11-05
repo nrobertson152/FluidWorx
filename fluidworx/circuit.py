@@ -68,7 +68,7 @@ class Circuit:
     el_gnd: int = 0
     el_wire_nodes: dict = field(default_factory=dict)
     el_term_nodes: dict = field(default_factory=dict)
-    el_rails: list = field(default_factory=list)    # (node, volts, label, part key) from a label such as +24V or L1
+    el_rails: list = field(default_factory=list)    # (node, volts, label, part keys) from a label such as +24V or L1
     el_vnom: float = 24.0                           # the drawing's main supply, for a part in a circuit with none
     el_circuit_of: dict = field(default_factory=dict)   # node -> which circuit it's in: isolated ones differ
     links: list = field(default_factory=list)
@@ -202,6 +202,9 @@ def _electric_params(part: Part) -> None:
                     continue
             part.params[key] = v
             part.from_schematic.add(key)
+    for key, d in defs.items():         # a label can say anything: no part divides by what it read here
+        if key in part.params:
+            part.params[key] = max(d.minimum, min(d.maximum, part.params[key]))
 
 
 def _sensor_range(part: Part, text: str) -> None:
@@ -225,9 +228,11 @@ def _sensor_range(part: Part, text: str) -> None:
 def apply_study_params(circuit: "Circuit", params: dict) -> None:
     """Overlay a study's edited values (keyed "sheet uid/component id"); values for missing parts are kept unused."""
     for p in circuit.parts:
+        limits = {d.key: d for d in catalog.PARAMS.get(p.kind, [])}
         for k, v in params.get(f"{p.key[0]}/{p.key[1]}", {}).items():
             if k in p.params:
-                p.params[k] = v
+                d = limits.get(k)
+                p.params[k] = max(d.minimum, min(d.maximum, v)) if d is not None else v
 
 
 def load_project(path: str):
@@ -308,8 +313,8 @@ def build(project, warnings=(), overrides=None) -> Circuit:
                 parts.append(part)
                 if spec.kind == "unsupported" and part.key not in unsupported_seen:
                     unsupported_seen.add(part.key)
-                    issues.append(Issue("warning", f"{tag}: “{part.symbol_name}” is not simulated yet; its ports "
-                                                   "are treated as blocked.", part.key))
+                    what = "nothing passes through it" if medium == "el" else "its ports are treated as blocked"
+                    issues.append(Issue("warning", f"{tag}: “{part.symbol_name}” is not simulated yet; {what}.", part.key))
                 elif spec.approx:
                     issues.append(Issue("info", f"{tag}: {spec.approx}", part.key))
             (sheets if count else skipped).append(doc.uid if count else doc.name)
@@ -359,6 +364,9 @@ def build(project, warnings=(), overrides=None) -> Circuit:
         _circuit_checks(fluid, fixed, issues)
         node_medium = {n: ("hyd" if "hyd" in m else "pneu") for n, m in node_medium.items()}
         electric = _electric_nodes(project, parts, nets, term_net, wire_net, issues)
+        if set(wire_nodes) & set(electric.get("el_wire_nodes", ())):
+            issues.append(Issue("warning", "A line joins a fluid port to an electrical terminal. The two sides are simulated "
+                                           "separately, so it does nothing."))
         _electrical_checks(parts, issues, electric)
         found = links_mod.resolve(parts, issues, Issue)
     if skipped:
@@ -495,7 +503,9 @@ def _electric_nodes(project, parts, nets, term_net, wire_net, issues) -> dict:
         if value == 0.0:
             nodes.union(key, GND)
         else:
-            rails.setdefault(links_mod.rail_key(label, value), (key, value, label, part_key))
+            entry = rails.setdefault(links_mod.rail_key(label, value), [key, value, label, []])
+            if part_key is not None:
+                entry[3].append(part_key)
     sets = circuits()
     has_source = fed(sets)
     # number the nodes
@@ -519,7 +529,7 @@ def _electric_nodes(project, parts, nets, term_net, wire_net, issues) -> dict:
     for w, ni in wire_net.items():
         if ("net", ni) in nodes.up:
             wire_nodes[w] = number(("net", ni))
-    rail_entries = [(number(key), value, label, part_key) for key, value, label, part_key in rails.values()]
+    rail_entries = [(number(key), value, label, tuple(part_keys)) for key, value, label, part_keys in rails.values()]
     # a circuit fed by something real needs a reference. An earth gives it one; otherwise pick a sensible terminal.
     fixed = {gnd}
     earthed = sets.find(nodes.find(GND))
