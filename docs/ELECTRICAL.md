@@ -115,10 +115,17 @@ OpenSchematix's `docs/PLC.md`. In FluidWorx:
 A part's rating of 0 means "the voltage of the circuit it's in". So a coil with no rating on a 230 V circuit is a 230 V coil, and one
 marked `24 V` on a 12 V circuit doesn't pull in, as it wouldn't in real life.
 
-**Races have one answer.** Relays change one at a time, the first in drawing order winning, with the voltages worked out again between
-each. So in an interlock, the first relay drawn wins, every time. Logic parts all change together on one solution, which is what lets
-two flip-flops on one clock shift by one place. A relay changes at most once a 10 ms step, so one that interrupts itself buzzes, and
-the Events tab says it's chattering. Logic that oscillates carries on and says so.
+**Races have one answer, and say so.** Relays change one at a time, the first in drawing order winning, with the voltages worked out
+again between each. So in an interlock, the first relay drawn wins, every time. A real machine has no drawing order, so when relays are
+ready to change at the same moment and another order would leave them differently, the Events tab says *K1 and K2 raced*, a message
+appears, the status bar counts it, and the report lists it. The order is tried for real, on the relays and logic, with no effect on the
+run. A relay that only blips in one order, with nothing to show for it afterwards, isn't reported. It looks at what the relays do to each
+other at that moment, so a race that only shows through the fluid side, such as a valve shifting in time, isn't found. So no warning
+doesn't prove there's no race.
+
+Logic parts all change together on one solution, which is what lets two flip-flops on one clock shift by one place: they count as much
+faster than relays. A relay changes at most once a 10 ms step, so one that interrupts itself buzzes, and the Events tab says it's
+chattering. Logic that oscillates carries on and says so.
 
 ## Reading values from the drawing
 
@@ -138,7 +145,7 @@ the Events tab says it's chattering. Logic that oscillates carries on and says s
 
 The report has a **Supplies** table (peak current so far, against the limit and against everything connected) and a **Protection** table (peak
 current against rating). The Events tab reports a supply short-circuiting or overloaded, a fuse or breaker opening, an overload tripping, a
-coil over-voltaged, a pump asking more of its motor than its rating, a PLC output carrying more than its rating, and a relay chattering. Voltage, current and on/off signals can all be
+coil over-voltaged, a pump asking more of its motor than its rating, a PLC output carrying more than its rating, a relay chattering, and relays that raced. Voltage, current and on/off signals can all be
 plotted on the Trace tab, and exported.
 
 ## What it doesn't do

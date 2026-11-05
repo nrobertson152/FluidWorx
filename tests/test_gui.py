@@ -476,3 +476,26 @@ def test_reset_and_theme_change_with_electrical_parts_on_screen(app):
     app.set_units("us")
     pump(app, 2)
     assert app.units.fmt("voltage", 24.0) == "24 V"
+
+
+def test_a_race_is_told_to_the_user_and_is_in_the_report(app, tmp_path):
+    from drawing import Drawing
+    from test_electric import interlock
+    from fluidworx import report, study as st
+    d = Drawing()
+    interlock(d, "K1", "K2")
+    p = tmp_path / "race.schematix"
+    from fluidworx.vendor.openschematix import projectio
+    projectio.save_project(d.project, str(p))
+    assert app.open_path(str(p), confirm=False)
+    app.root.update()
+    app._refresh_views(force=True)
+    assert app._races_said == 1
+    assert "1 race" in app.check_label.cget("text")
+    rows = [app.events_panel.tree.item(i) for i in app.events_panel.tree.get_children()]
+    assert any(r["values"][2].startswith("Race:") and "warning" in r["tags"] for r in rows)
+    html = report.html_report(app.study, app.circuit, app.sim, app.units, app.doc)
+    assert "<h2>Races</h2>" in html and "K1" in html
+    app.reset()
+    app._refresh_views(force=True)
+    assert "1 race" in app.check_label.cget("text")

@@ -31,7 +31,8 @@ jobs:
           git clone --depth 1 https://github.com/nrobertson152/RevisionWorx ../RevisionWorx
           git clone --depth 1 https://github.com/nrobertson152/Caldera ../Caldera
           python -m pip install -e ../RevisionWorx
-          echo "PYTHONPATH=$(cd ../Caldera && pwd)" >> "$GITHUB_ENV"
+          # Python prints it: on Windows, the path bash would give (/d/a/...) means nothing to Python, and Caldera's tests were skipped
+          echo "PYTHONPATH=$(python -c 'import os; print(os.path.abspath("../Caldera"))')" >> "$GITHUB_ENV"
       - name: Install Tk and Xvfb (Linux)
         if: runner.os == 'Linux'
         run: |

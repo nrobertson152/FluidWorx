@@ -264,6 +264,11 @@ def html_report(study, circuit, sim, units: Units, doc, title: str = "") -> str:
             sections.append("<h2>Protection</h2><table><tr><th>Part</th><th>Rating</th><th>Peak current so far</th><th>Of rating</th>"
                             "<th>State</th></tr>"
                             + "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in row) + "</tr>" for row in protection) + "</table>")
+    if sim.net.races:
+        sections.append('<h2>Races</h2><p class="note">These relays were ready to change at the same moment, and the result above is '
+                        "only one of the answers: the simulation changes them in drawing order, and a real machine has no drawing order.</p>"
+                        "<table><tr><th>Time (s)</th><th>Went first</th><th>Raced</th></tr>"
+                        + "".join(f"<tr><td>{t:.2f}</td><td>{e(a)}</td><td>{e(b)}</td></tr>" for t, a, b in sim.net.races) + "</table>")
     if time_rows:
         sections.append("<h2>Measured strokes</h2><table><tr><th>Actuator</th><th>Extend</th><th>Retract</th></tr>"
                         + "".join(time_rows) + "</table>")

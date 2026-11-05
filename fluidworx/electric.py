@@ -7,7 +7,8 @@ one answer:
 
 * logic gates and flip-flops all look at the same solution and change together, so a shift register shifts by one;
 * relays change **one at a time**, re-solving in between, the first in drawing order winning. A relay changes at most
-  once a step, so one that interrupts itself buzzes instead of hanging the program.
+  once a step, so one that interrupts itself buzzes instead of hanging the program. Where the order makes a difference
+  to how the relays end up, the Events tab says so: a real machine could go either way.
 
 What this is: correct logic, and voltages and currents good enough for engineering checks (does the coil pick up, what
 does the supply carry, does the fuse hold). What it isn't: a circuit simulator. AC is carried at its RMS value, with
@@ -38,6 +39,7 @@ EPS_V = 1e-4            # a change smaller than this isn't worth another solve
 MAX_PIECEWISE = 30
 MAX_SCANS_PER_STEP = 10
 CHATTER_PER_SECOND = 20
+MAX_RACE_TRIALS = 8     # other relays tried first, at one moment: more than this is a drawing no one can reason about anyway
 FUSE_I2T = 10.0         # (I/In)^2 seconds: 10x in 0.1 s, 2x in about 3 s
 BREAKER_I2T = 30.0      # 2x in 10 s; 5x and more at once
 OVERLOAD_I2T = 400.0    # 7.2x in about 8 s, 2x in about 2 minutes
@@ -2001,6 +2003,8 @@ class Coil(Load):
     def flip(self):
         self.energised = not self.energised
         self._contacts_now()
+        if self.net.what_if:
+            return
         sim = self.net.sim
         self.flip_times.append(sim.time)
         while self.flip_times and self.flip_times[0] < sim.time - 1.0:
@@ -2419,6 +2423,10 @@ BEHAVIOURS = {
 
 
 # ---------------------------------------------------------------- the network
+# What doesn't change while the relays settle, or isn't the part's own to restore. Everything else in a part is its state.
+_NOT_STATE = frozenset(("net", "part", "t", "names", "par", "lines", "poles", "reader", "follows", "rt", "addr", "ai_ma", "ao_ma"))
+
+
 class Network:
     def __init__(self, sim, circuit):
         self.sim = sim
@@ -2454,6 +2462,11 @@ class Network:
         # odd, so that logic oscillating every round is seen to oscillate rather than looking still at every step's end
         self._rounds = 2 * len(self.coils) + 2 * len(self.logic) + 9
         self._oscillation_said = False
+        self.what_if = False    # relays are being tried in another order: nothing that happens now is real
+        self.races = []         # (time, the relay that went first, the one it raced), as found
+        self._race_pairs = set()
+        self._race_tried = set()
+        self._compared = set()
 
     # ---- construction
     def new_node(self) -> int:
@@ -2579,6 +2592,7 @@ class Network:
         if not self.free:
             return
         flipped = set()
+        self._compared = set()
         calm = True
         # logic that oscillates gets what shows it oscillating, and no more: it would otherwise use the whole allowance each step
         for _ in range(9 if self._oscillation_said else self._rounds):
@@ -2589,11 +2603,13 @@ class Network:
             if logic_moved:
                 calm = False
                 continue
-            coil = next((c for c in self.coils if id(c) not in flipped and c.wants_flip(self.v)), None)
-            if coil is None:
+            wanting = [c for c in self.coils if id(c) not in flipped and c.wants_flip(self.v)]
+            if not wanting:
                 break
-            coil.flip()
-            flipped.add(id(coil))
+            if len(wanting) > 1:
+                self._look_for_race(wanting)
+            wanting[0].flip()
+            flipped.add(id(wanting[0]))
             calm = False
         else:
             calm = False
@@ -2602,6 +2618,98 @@ class Network:
                 self.sim.log(self.logic[0].part.tag, "Logic oscillating: the gates keep changing each other")
         waiting = any(c.wants_flip(self.v) for c in self.coils)
         self.dirty = self.dirty or not calm or waiting
+
+    # ---- races
+    def _look_for_race(self, wanting):
+        """Several relays are ready to change at the same moment, and the first drawn goes first. A real machine has no
+        drawing order, so if another relay going first would end somewhere else, this result is only one of the answers.
+        The relays and logic are tried in the other order and put back. The fluid side isn't: this looks at what the relays
+        do to each other, there and then.
+
+        Only a relay that changes whether another moves can make the order matter, so that's looked for first, at the cost
+        of one solution per relay. Those still waiting after one has gone were already compared with each other."""
+        if self._compared.issuperset(id(c) for c in wanting):
+            return
+        self._compared.update(id(c) for c in wanting)
+        state = (tuple(id(c) for c in wanting), tuple(c.energised for c in self.coils), tuple(tuple(b.q.values()) for b in self.logic))
+        if state in self._race_tried:
+            return
+        if len(self._race_tried) >= 1000:
+            self._race_tried.clear()
+        self._race_tried.add(state)
+        stops = {c: self._stopped_by(c, wanting) for c in wanting}
+        trials = 0
+        ends = {}
+        for i, a in enumerate(wanting):
+            for b in wanting[i + 1:]:
+                pair = (a.part.tag, b.part.tag)
+                if (a not in stops[b] and b not in stops[a]) or pair in self._race_pairs or trials >= MAX_RACE_TRIALS:
+                    continue
+                for c in (a, b):
+                    if c not in ends:
+                        ends[c] = self._ends_up(c)
+                        trials += 1
+                if ends[a] != ends[b]:
+                    self._race_pairs.add(pair)
+                    self.races.append((self.sim.time, a.part.tag, b.part.tag))
+                    self.sim.log(a.part.tag, f"Race: {a.part.tag} and {b.part.tag} were ready to change at the same moment. "
+                                             f"{a.part.tag} went first only because it's drawn first, and with {b.part.tag} "
+                                             "first the relays end up differently. A real machine could go either way.")
+
+    def _stopped_by(self, coil, wanting) -> set:
+        """Which of the other relays waiting to change would no longer want to, if this one went first."""
+        saved = self._capture()
+        self.what_if = True
+        try:
+            coil.flip()
+            self._solve_piecewise()
+            return {c for c in wanting if c is not coil and not c.wants_flip(self.v)}
+        finally:
+            self._restore(saved)
+
+    def _ends_up(self, first):
+        """Where the relays and logic settle if this relay goes first, changing as they do in a real run: each at most once a
+        step. None if they never settle."""
+        saved = self._capture()
+        self.what_if = True
+        try:
+            first.flip()
+            flipped = {id(first)}
+            for _ in range(2 * self._rounds):
+                self._solve_piecewise()
+                moved = False
+                for b in self.logic:
+                    moved |= b.evaluate(self.v)
+                if moved:
+                    continue
+                wanting = [c for c in self.coils if c.wants_flip(self.v)]
+                if not wanting:
+                    return tuple(c.energised for c in self.coils), tuple(tuple(b.q.values()) for b in self.logic)
+                coil = next((c for c in wanting if id(c) not in flipped), None)
+                if coil is None:
+                    flipped = set()     # the next step
+                    continue
+                coil.flip()
+                flipped.add(id(coil))
+            return None
+        finally:
+            self._restore(saved)
+
+    def _capture(self):
+        parts = []
+        for b in self.parts:
+            state = {}
+            for k, value in vars(b).items():
+                if k not in _NOT_STATE:
+                    state[k] = value.copy() if isinstance(value, (dict, list, set)) else value
+            parts.append((b, state))
+        return parts, self.v
+
+    def _restore(self, saved):
+        parts, self.v = saved
+        for b, state in parts:
+            vars(b).update(state)
+        self.what_if = False
 
     def _push(self):
         """Tell the fluid side, only when something has changed: a click on the valve stays until the coil moves."""
@@ -2632,6 +2740,9 @@ class Network:
         self.v = [0.0] * self.node_count
         self._pushed = {}
         self._oscillation_said = False
+        self.races = []
+        self._race_pairs = set()
+        self._race_tried = set()
         self._nominal = None
         self.dirty = False
         for b in self.sensing:      # a switch already made at the start is made in the first solution
