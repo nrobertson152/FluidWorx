@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=FluidWorx
+GenericName=Fluid Power Simulator
+Comment=Simulate hydraulic and pneumatic circuits drawn in OpenSchematix
+Keywords=simulation;hydraulic;pneumatic;fluid power;schematic;
+Exec=@EXEC@ %f
+Icon=fluidworx
+Terminal=false
+Categories=Engineering;Science;
+MimeType=application/x-fluidworx-study;application/x-openschematix-project;
+StartupWMClass=FluidWorx

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluidworx"
+dynamic = ["version"]
+description = "Free and open-source hydraulic and pneumatic circuit simulator for OpenSchematix drawings"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Nate Robertson" }]
+requires-python = ">=3.10"
+dependencies = []          # standard library only (Tkinter required)
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
+    "Environment :: X11 Applications",
+    "Environment :: Win32 (MS Windows)",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyinstaller", "pillow"]
+
+[project.urls]
+"Support development" = "https://ko-fi.com/nr270343"
+
+[project.scripts]
+fluidworx-cli = "fluidworx.cli:main"
+
+[project.gui-scripts]
+fluidworx = "fluidworx.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "fluidworx.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["fluidworx*"]
+
+[tool.setuptools.package-data]
+fluidworx = ["resources/*", "examples/*", "vendor/openschematix/UPSTREAM.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
