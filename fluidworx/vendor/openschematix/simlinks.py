@@ -16,7 +16,7 @@ SOLENOID_B = "Solenoid b"
 DRIVEN_BY = "Driven by"
 ALL_KEYS = (SENSES, SOLENOID_A, SOLENOID_B, DRIVEN_BY)
 
-_SENSING = ("el.switch.limit.", "el.sensor.", "el.potentiometer.")
+_SENSING = ("el.switch.limit.", "el.switch.pressure.", "el.sensor.", "el.potentiometer.")
 _PUMPS = ("pump", "compressor", "vacuumpump")
 _BUILT_IN_SOLENOID = (".unloading.sol", ".dcv.seated", ".sol.check.no", ".sol.check.nc", ".diverter6")
 

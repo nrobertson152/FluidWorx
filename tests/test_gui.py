@@ -289,6 +289,19 @@ def test_a_push_button_is_held_while_the_mouse_is_down(app):
     assert not s0.manual
 
 
+def test_a_real_mouse_press_on_a_push_button(app):
+    open_ex(app, "plc_cylinder.schematix")
+    sheet_named(app, "Control")
+    s0 = tag(app, "S0")
+    e = event_at(app, s0.part.comp)
+    app.canvas.event_generate("<ButtonPress-1>", x=int(e.x), y=int(e.y))
+    pump(app, 2)
+    assert s0.manual
+    app.canvas.event_generate("<ButtonRelease-1>", x=int(e.x), y=int(e.y))
+    pump(app, 2)
+    assert not s0.manual
+
+
 def test_pressing_start_runs_the_machine_on_screen(app):
     open_ex(app, "plc_cylinder.schematix")
     sheet_named(app, "Control")
