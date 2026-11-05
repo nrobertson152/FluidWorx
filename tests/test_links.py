@@ -534,6 +534,81 @@ def test_a_motor_drives_the_pump_with_its_tag():
     assert b.running and sim.p[b.node(0)] > 45e5
 
 
+def pump_rig(flow, relief, motor_symbol, motor_label):
+    d = Drawing(sheets=2)
+    pump, tank, rv, t2 = d.add("fl.hyd.pump", "M1", flow), d.add("fl.hyd.tank", "Z1"), d.add("fl.hyd.relief", "V1", relief), d.add("fl.hyd.tank", "Z2")
+    d.wire((pump, "S"), (tank, "T"))
+    d.wire((pump, "P"), (rv, "P"))
+    d.wire((rv, "T"), (t2, "T"))
+    motor = d.add(motor_symbol, "M1", motor_label, sheet=1)
+    return d, motor, pump
+
+
+def test_a_motor_draws_what_its_pump_is_doing():
+    """10 L/min at 100 bar is 1667 W, or 1961 W at 85%. At 400 V that's 1961 / (sqrt(3) x 400) = 2.83 A."""
+    d, motor, _pump = pump_rig("10 L/min", "100 bar", "el.motor.3ph", "3 kW")
+    for name, pin in (("L1", "U1"), ("L2", "V1"), ("L3", "W1")):
+        d.wire((d.add("el.rail.pos", "", name, sheet=1), "1"), (motor, pin))
+    sim = d.sim()
+    sim.run(1.0)
+    b = part(sim, motor)
+    assert b.shaft_watts() == pytest.approx(10e-3 / 60 * 100e5 / 0.85, rel=0.03)
+    assert max(abs(i) for i in b.currents(sim.net.v).values()) == pytest.approx(2.83, rel=0.03)
+    assert not any("asking" in text for _t, _tag, text in sim.events)
+
+
+def test_a_pump_asking_too_much_of_its_motor_is_reported():
+    """The same 1961 W from a 750 W motor. On a 12 V DC motor as well, to show it's the same rule. It's a resistance of
+    12^2 / 1961 = 73 mOhm, so with the source's 20 mOhm in series it takes 12 / 0.0934 = 128 A."""
+    d, motor, _pump = pump_rig("10 L/min", "100 bar", "el.motor", "12 V 750 W")
+    src = d.add("el.source.dc", "G1", "12 V", sheet=1)
+    d.wire((src, "+"), (motor, "1"))
+    d.wire((motor, "2"), (src, "-"))
+    sim = d.sim()
+    sim.run(1.0)
+    assert any("asking for" in text and "750 W" in text for _t, _tag, text in sim.events)
+    assert part(sim, motor).through() == pytest.approx(12.0 / (12.0 ** 2 / 1961.0 + 0.02), rel=0.03)
+
+
+def test_a_motor_turning_an_unloaded_pump_draws_little():
+    """Nothing resists the pump: about a tenth of its rating."""
+    d = Drawing(sheets=2)
+    pump, tank, t2 = d.add("fl.hyd.pump", "M1", "10 L/min"), d.add("fl.hyd.tank", "Z1"), d.add("fl.hyd.tank", "Z2")
+    d.wire((pump, "S"), (tank, "T"))
+    d.wire((pump, "P"), (t2, "T"))
+    src, motor = d.add("el.source.dc", "G1", "24 V", sheet=1), d.add("el.motor", "M1", "24 V 1 kW", sheet=1)
+    d.wire((src, "+"), (motor, "1"))
+    d.wire((motor, "2"), (src, "-"))
+    sim = d.sim()
+    sim.run(0.5)
+    assert part(sim, motor).shaft_watts() == pytest.approx(100.0, rel=0.05)
+
+
+def test_a_motor_driving_nothing_draws_its_rating():
+    d = Drawing()
+    src, motor = d.add("el.source.dc", "G1", "24 V"), d.add("el.motor", "M1", "24 V 240 W")
+    d.wire((src, "+"), (motor, "1"))
+    d.wire((motor, "2"), (src, "-"))
+    sim = d.sim()
+    sim.run(0.1)
+    assert part(sim, motor).through() == pytest.approx(24.0 / 2.42, abs=0.01), "2.4 ohm, and the source's 20 mOhm"
+
+
+def test_a_bidirectional_pump_follows_its_motor_round():
+    d = Drawing(sheets=2)
+    pump, t1, t2 = d.add("fl.hyd.pump.bidir", "M1", "10 L/min"), d.add("fl.hyd.tank", "Z1"), d.add("fl.hyd.tank", "Z2")
+    names = [t.name for t in pump.terminal_defs()]
+    d.wire((pump, names[0]), (t1, "T"))
+    d.wire((pump, names[1]), (t2, "T"))
+    motor = d.add("el.motor.3ph", "M1", "1 kW", sheet=1)
+    for name, pin in (("L1", "V1"), ("L2", "U1"), ("L3", "W1")):        # two phases swapped
+        d.wire((d.add("el.rail.pos", "", name, sheet=1), "1"), (motor, pin))
+    sim = d.sim()
+    sim.run(0.1)
+    assert part(sim, motor).status() == "Running, reversed"
+    assert part(sim, pump).reversed
+
+
 def test_driven_by_names_the_motor():
     d = Drawing(sheets=2)
     pump, tank = d.add("fl.hyd.pump", "P1", "10 L/min", props={"Driven by": "M7"}), d.add("fl.hyd.tank", "Z1")
@@ -689,9 +764,9 @@ def test_plc_turns_round_on_pressure_when_the_rod_meets_something():
     assert part(sim, r["cyl"]).x < 0.02
 
 
-@pytest.mark.parametrize("lang,source", [
-    ("st", ST_PROGRAM),
-    ("c", """
+EVERY_LANGUAGE = {
+    "st": ST_PROGRAM,
+    "c": """
 bool extending;
 void loop(void) {
     if (Start && AtHome) extending = true;
@@ -699,8 +774,8 @@ void loop(void) {
     Extend = extending;
     Retract = !extending && !AtHome;
 }
-"""),
-    ("python", """
+""",
+    "python": """
 extending = False
 def loop():
     global extending, Extend, Retract
@@ -710,22 +785,57 @@ def loop():
         extending = False
     Extend = extending
     Retract = not extending and not AtHome
-"""),
-])
-def test_the_same_machine_runs_the_same_in_each_text_language(lang, source):
-    params = plc_params(pous=[{"name": "Main", "lang": lang, "source": source}], vars=[])
-    if lang == "st":
-        params["program"]["vars"] = [{"name": "Extending", "type": "BOOL", "init": "", "note": ""}]
+""",
+    "ld": {"rungs": [
+        {"items": [{"t": "par", "branches": [[{"t": "no", "a": "Start"}, {"t": "no", "a": "AtHome"}], [{"t": "no", "a": "Extending"}]]},
+                   {"t": "nc", "a": "AtEnd"}, {"t": "coil", "a": "Extending"}]},
+        {"items": [{"t": "no", "a": "Extending"}, {"t": "coil", "a": "Extend"}]},
+        {"items": [{"t": "nc", "a": "Extending"}, {"t": "nc", "a": "AtHome"}, {"t": "coil", "a": "Retract"}]}]},
+    "fbd": {"blocks": [
+        {"id": 1, "type": "input", "expr": "Start", "x": 0, "y": 0}, {"id": 2, "type": "input", "expr": "AtHome", "x": 0, "y": 40},
+        {"id": 3, "type": "AND", "x": 100, "y": 0}, {"id": 4, "type": "input", "expr": "Extending", "x": 0, "y": 80},
+        {"id": 5, "type": "OR", "x": 200, "y": 0}, {"id": 6, "type": "input", "expr": "AtEnd", "x": 0, "y": 120},
+        {"id": 7, "type": "NOT", "x": 100, "y": 120}, {"id": 8, "type": "AND", "x": 300, "y": 0},
+        {"id": 9, "type": "output", "target": "Extending", "x": 400, "y": 0}, {"id": 10, "type": "output", "target": "Extend", "x": 400, "y": 40},
+        {"id": 11, "type": "NOT", "x": 300, "y": 80}, {"id": 12, "type": "NOT", "x": 100, "y": 40}, {"id": 13, "type": "AND", "x": 400, "y": 80},
+        {"id": 14, "type": "output", "target": "Retract", "x": 500, "y": 80}],
+        "wires": [{"from": [1, "OUT"], "to": [3, "IN1"]}, {"from": [2, "OUT"], "to": [3, "IN2"]}, {"from": [3, "OUT"], "to": [5, "IN1"]},
+                  {"from": [4, "OUT"], "to": [5, "IN2"]}, {"from": [5, "OUT"], "to": [8, "IN1"]}, {"from": [6, "OUT"], "to": [7, "IN"]},
+                  {"from": [7, "OUT"], "to": [8, "IN2"]}, {"from": [8, "OUT"], "to": [9, "IN"]}, {"from": [8, "OUT"], "to": [10, "IN"]},
+                  {"from": [8, "OUT"], "to": [11, "IN"]}, {"from": [2, "OUT"], "to": [12, "IN"]}, {"from": [11, "OUT"], "to": [13, "IN1"]},
+                  {"from": [12, "OUT"], "to": [13, "IN2"]}, {"from": [13, "OUT"], "to": [14, "IN"]}]},
+    "sfc": {"steps": [
+        {"id": 1, "name": "Waiting", "initial": True, "actions": []},
+        {"id": 2, "name": "GoingOut", "actions": [{"q": "N", "target": "Extend"}]},
+        {"id": 3, "name": "ComingBack", "actions": [{"q": "N", "target": "Retract"}]}],
+        "transitions": [{"id": 1, "from": [1], "to": [2], "cond": "Start AND AtHome"},
+                        {"id": 2, "from": [2], "to": [3], "cond": "AtEnd"},
+                        {"id": 3, "from": [3], "to": [1], "cond": "AtHome"}]},
+}
+
+
+@pytest.mark.parametrize("lang", sorted(EVERY_LANGUAGE))
+def test_the_same_machine_runs_the_same_in_every_language(lang):
+    """Out on Start, back at the end of the stroke, waiting again at home: the same times, whichever language says so."""
+    variables = [{"name": "Extending", "type": "BOOL", "init": "", "note": ""}] if lang in ("st", "ld", "fbd") else []
+    params = plc_params(pous=[{"name": "Main", "lang": lang, "source": EVERY_LANGUAGE[lang]}], vars=variables)
     assert not [x for x in plc_core.check(params) if x.level == "error"], plc_core.check(params)
     d, r = plc_rig(params)
     sim = d.sim()
     sim.run(0.2)
-    press(sim, r["start"])
     cyl = part(sim, r["cyl"])
-    sim.run(3.0)
-    assert cyl.x > 0.1 and part(sim, r["plc"]).outs["Q1"]
-    sim.run(3.0)
-    assert cyl.x == pytest.approx(0.0, abs=1e-3)
+    assert part(sim, r["plc"]).status() == "Run" and cyl.x == 0.0
+    press(sim, r["start"])
+    sim.run(2.0)
+    assert cyl.x > 0.15 and part(sim, r["ya"]).energised, "on its way out"
+    sim.run(0.6)
+    assert part(sim, r["yb"]).energised and not part(sim, r["ya"]).energised, "the end switch turned it round"
+    sim.run(2.5)
+    assert cyl.x < 0.005 and not part(sim, r["yb"]).energised, "and home it stops"
+    assert part(sim, r["plc"]).status() == "Run"
+    press(sim, r["start"])
+    sim.run(0.5)
+    assert cyl.x > 0.0, "and it goes again"
 
 
 def test_plc_does_not_run_without_its_supply():

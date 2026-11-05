@@ -7,8 +7,10 @@ anything that looks like it should have been tied to something but wasn't.
 """
 from __future__ import annotations
 
+import cmath
+import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from . import units
 from .vendor.openschematix import simlinks
@@ -20,7 +22,6 @@ FLUID_ACTUATORS = ("cylinder", "cylinder_single", "cylinder_equal", "motor", "ro
 FLUID_PRESSURE = ("gauge", "pressure_switch")
 _PUMPS = ("pump", "pump_pc", "compressor")
 _END = {"extended": 1.0, "end": 1.0, "+": 1.0, "retracted": 0.0, "home": 0.0, "start": 0.0, "-": 0.0}
-_SIDE_SUFFIX = re.compile(r"^(.+?)[-_.: ]?([abAB])$")
 
 
 @dataclass
@@ -75,7 +76,6 @@ class Link:
     text: str               # for the Links panel
     side: str = ""          # left | right, for a solenoid
     sense: Sense | None = None
-    live: dict = field(default_factory=dict)
 
 
 def _fold(tag) -> str:
@@ -276,8 +276,6 @@ def parse_rail(label: str):
         return -v if m.group(1) == "-" else v
     m = _PHASE.match(text)
     if m:
-        import cmath
-        import math
         phase = int(m.group(1))
         line_neutral = float(m.group(2)) / SQRT3 if m.group(2) else 230.0
         return cmath.rect(line_neutral, math.radians(-120.0 * (phase - 1)))

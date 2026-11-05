@@ -411,7 +411,7 @@ def relay_latch():
 
 def motor_starter():
     b = B("Three-phase starter driving a hydraulic pump")
-    pump = b.part("fl.hyd.pump", 500, 500, "P1", "20 L/min", props={"Driven by": "M1"})
+    pump = b.part("fl.hyd.pump", 500, 500, "P1", "10 L/min", props={"Driven by": "M1"})
     t1 = b.part("fl.hyd.tank", 500, 580, "Z1")
     rv = b.part("fl.hyd.relief", 640, 420, "V1", "100 bar", rot=180)
     t2 = b.part("fl.hyd.tank", 640, 500, "Z2")

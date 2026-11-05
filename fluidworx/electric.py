@@ -1753,8 +1753,35 @@ class Sounder(Load):
     ON_WORD = "Sounding"
 
 
-class ElectricMotor(Load):
-    """Runs from 70% of its voltage. Its current is what its power says at that voltage, whatever the fluid side asks."""
+class _Shaft:
+    """What a motor driving a pump draws: what the pump is doing, at that voltage. It costs a tenth of its rating just to turn,
+    and asked for more than its rating it says so and carries on, for its fuse or overload to deal with. A motor that drives
+    no pump draws its rated power."""
+    NO_LOAD = 0.1
+    PUMP_EFFICIENCY = 0.85
+    demand = None
+    over_said = False
+
+    def shaft_watts(self) -> float:
+        return self.par["power"] if self.demand is None else self.demand
+
+    def set_load(self, hydraulic_watts):
+        rated = self.par["power"]
+        want = max(self.NO_LOAD * rated, hydraulic_watts / self.PUMP_EFFICIENCY)
+        if self.demand is None or abs(want - self.demand) > 0.02 * rated:
+            self.demand = want
+            self.net.dirty = True
+        if want > 1.05 * rated and not self.over_said:
+            self.over_said = True
+            self.net.sim.log(self.part.tag, f"The pump is asking for {want:.0f} W, more than its {rated:g} W rating")
+
+    def _reset_shaft(self):
+        self.demand = None
+        self.over_said = False
+
+
+class ElectricMotor(_Shaft, Load):
+    """Runs from 70% of its voltage. Its current follows the pump it drives; see _Shaft."""
     ON_WORD = "Running"
     ON_AT = 0.7
 
@@ -1764,6 +1791,11 @@ class ElectricMotor(Load):
 
     def reset(self):
         self.running = False
+        self._reset_shaft()
+
+    def g(self):
+        r = max(self.rated(), 1e-3)
+        return self.shaft_watts() / (r * r)
 
     def commit(self, v, dt):
         volts = mag(v[self.t[self.names[0]]] - v[self.t[self.names[1]]])
@@ -1783,7 +1815,7 @@ class ElectricMotor(Load):
         return un.fmt("current", mag(self.across()) * self.g()) if self.running else ""
 
 
-class Motor3(Part):
+class Motor3(_Shaft, Part):
     """Three windings in star. Lose a phase while running and it hums on, drawing more, until something protects it;
     lose one while stopped and it won't start. Swap two phases and it runs the other way."""
     quiet = False
@@ -1799,6 +1831,7 @@ class Motor3(Part):
         self.running = False
         self.lost_phase = False
         self.rev = False
+        self._reset_shaft()
 
     def _rated(self):
         given = self.par.get("rated")
@@ -1809,7 +1842,7 @@ class Motor3(Part):
 
     def _g(self):
         r = max(self._rated(), 1e-3)
-        g = self.par["power"] / (r * r)
+        g = self.shaft_watts() / (r * r)
         return 2.0 * g if self.lost_phase else g
 
     def stamp(self, s):
@@ -1867,7 +1900,7 @@ class Motor3(Part):
         v = self.net.v
         amps = max(mag(i) for i in self.currents(v).values())
         line = mag(v[self.t[self.names[0]]] - v[self.t[self.names[1]]])
-        return [("Line voltage", "voltage", line), ("Line current", "current", amps), ("Power", "power", self.par["power"] if self.running else 0.0)]
+        return [("Line voltage", "voltage", line), ("Line current", "current", amps), ("Power", "power", self.shaft_watts() if self.running else 0.0)]
 
     def trace_channels(self):
         return [self._state_channel("running"),
@@ -2383,6 +2416,7 @@ class Network:
         self.plcs = [b for b in self.parts if isinstance(b, Plc)]
         self.sensing = []
         self.outputs = []       # (coil or motor, fluid part, side or None)
+        self.shafts = []        # (motor, pump): the load on a motor is what its pump is doing
         self._pushed = {}
         self._link_up(circuit.links)
         # odd, so that logic oscillating every round is seen to oscillate rather than looking still at every step's end
@@ -2426,6 +2460,7 @@ class Network:
                     pump.driven_by = src.part.tag
                     pump.running = False
                     self.outputs.append((src, pump, None))
+                    self.shafts.append((src, pump))
         for b in self.parts:
             if isinstance(b, (AnalogSensor, LoopSensor)) and b not in self.sensing:
                 self.sensing.append(b)
@@ -2584,6 +2619,8 @@ class Network:
         self.dt = dt
         for b in self.sensing:
             b.sense(dt)
+        for motor, pump in self.shafts:
+            motor.set_load(pump.q(self.sim.p) * max(pump._dp(self.sim.p), 0.0))
         for b in self.plcs:
             b.tick(dt)
         if self.dirty:

@@ -212,7 +212,6 @@ def _sensor_range(part: Part, text: str) -> None:
         span = units.find_range(text, quantity)
         if span:
             part.params["lo"], part.params["hi"] = span[0] * factor, span[1] * factor
-            part.params["range_unit"] = 1.0 if quantity == "pressure" else 2.0
             part.from_schematic |= {"lo", "hi"}
             break
     amps = units.find_range(text, "current")
@@ -363,7 +362,7 @@ def build(project, warnings=(), overrides=None) -> Circuit:
                                     + ". It is simulated as one fluid."))
         _circuit_checks(fluid, fixed, issues)
         node_medium = {n: ("hyd" if "hyd" in m else "pneu") for n, m in node_medium.items()}
-        electric = _electric_nodes(project, parts, nets, term_net, wire_net, issues)
+        electric = _electric_nodes(project, parts, term_net, wire_net)
         if set(wire_nodes) & set(electric.get("el_wire_nodes", ())):
             issues.append(Issue("warning", "A line joins a fluid port to an electrical terminal. The two sides are simulated "
                                            "separately, so it does nothing."))
@@ -420,7 +419,7 @@ class _Sets:
         self.up[self.find(a)] = self.find(b)
 
 
-def _electric_nodes(project, parts, nets, term_net, wire_net, issues) -> dict:
+def _electric_nodes(project, parts, term_net, wire_net) -> dict:
     """One node per electrical net, with terminals and earths merged, and a 0 V reference in every circuit.
 
     The nets are the editor's own. The one thing added is what any reader of a drawing does: supply lines with the same

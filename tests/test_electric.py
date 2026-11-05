@@ -5,8 +5,6 @@ import math
 import pytest
 from drawing import Drawing, diff, part, volts
 
-from fluidworx import electric
-
 
 def supply(d, volts_=24.0):
     src = d.add("el.source.dc", "G1", f"{volts_} V")
@@ -937,7 +935,8 @@ def test_a_lost_phase_stops_a_motor_starting_and_overloads_a_running_one():
 
 
 def test_a_starter_with_overload_stops_itself():
-    """Contactor K1, overload F1 in the motor circuit, and F1's NC contact in the K1 coil circuit."""
+    """Contactor K1, overload F1 in the motor circuit, and F1's NC contact in the K1 coil circuit. This motor drives nothing,
+    so it draws its rating."""
     d, rails, motor = three_phase()
     k_main, f1 = d.add("el.contact.3no", "K1"), d.add("el.overload.3p", "F1", "1.5 A")
     pos, neg = d.add("el.rail.pos", "", "+24V"), d.add("el.rail.neg", "", "0V")

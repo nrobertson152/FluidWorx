@@ -19,7 +19,7 @@ no better. See [What it doesn't do](#what-it-doesnt-do).
 | Coil `Y4` | Proportional valve `Y4` | Its voltage sets the opening: 10 V is fully open, unless the coil has its own rating |
 | Contact `S3` | Pressure switch `S3` | The contact follows the switch |
 | Analog sensor `PT1` | Gauge or transducer `PT1` | The sensor reads that pressure |
-| Motor `M1` | Pump `M1` | The pump runs while the motor does |
+| Motor `M1` | Pump `M1` | The pump runs while the motor does, and the motor draws what the pump is doing |
 | Contact `K1` | (coil `K1`, electrical) | The contact follows the coil |
 | Contact `F1` | (overload `F1`, electrical) | The contact changes when the overload trips |
 
@@ -70,8 +70,8 @@ OpenSchematix's `docs/PLC.md`. In FluidWorx:
   off below 60%. Reversed, it's off. With nothing wired there, it doesn't run, and the Checks tab says so.
 - **Each scan:** inputs are read from the voltages at the last step, the programs run in their listed order, outputs are written.
   The scan time is the program's own, and timers keep real time whatever it is.
-- **Inputs** are 3.3 kΩ to `M`. On at 15 V and off at 5 V on a 24 V supply, holding in between. **Analog inputs** are 100 kΩ, or 250 Ω
-  for a current signal. **Outputs** switch `L+` to the pin (sourcing), the pin to `M` (sinking), or `C` to the pin (relay).
+- **Inputs** are 3.3 kΩ to `M`. On at 15 V and off at 5 V on a 24 V supply, holding in between. So a switch to +24 V or a PNP sensor is
+  the straightforward wiring; an NPN sensor needs a pull-up, and reads inverted. **Analog inputs** are 100 kΩ, or 250 Ω for a current signal. **Outputs** switch `L+` to the pin (sourcing), the pin to `M` (sinking), or `C` to the pin (relay).
   **Analog outputs** are 1 Ω voltage sources or current sources.
 - A fault, such as a division by zero or an endless loop, stops the PLC and drops its outputs, and the reason is in the Events tab.
   Properties has **Stop/Run** and **Restart**, and the live value of every input, output and variable.
@@ -99,8 +99,8 @@ OpenSchematix's `docs/PLC.md`. In FluidWorx:
 | Fuse | Heat as (I/In)² seconds: blows at 10 of it, which is about 10× in 0.1 s and 2× in 3 s |
 | Breaker | The same at 30, about 2× in 10 s, and at once from 5× |
 | Thermal overload | Changes its contacts: about 7× in 8 s and 2× in 2 minutes. It never opens the power circuit itself |
-| Motor | A resistance from its voltage and power. Runs from 70% of its voltage |
-| Three-phase motor | Three windings in star. It won't start on two phases; running, it carries on, with √3 the current, until an overload acts. Swap two phases and it reverses |
+| Motor | A resistance from its voltage and power. Runs from 70% of its voltage. Driving a pump, its power is flow × pressure ÷ 0.85, and at least a tenth of its rating |
+| Three-phase motor | The same, as three windings in star. It won't start on two phases; running, it carries on, with √3 the current, until an overload acts. Swap two phases and it reverses |
 | Lamp, sounder | A resistance from its voltage and power |
 | Proximity sensor | Three wires, output tied to + (PNP) or − (NPN). Needs its supply |
 | Analog sensor | Voltage or current out in proportion to what it reads. Three wires, or two for 4-20 mA with about 9 V needed across it |
@@ -131,7 +131,7 @@ the Events tab says it's chattering. Logic that oscillates carries on and says s
 
 The report has a **Supplies** table (peak current so far, against the limit and against everything connected) and a **Protection** table (peak
 current against rating). The Events tab reports a supply short-circuiting or overloaded, a fuse or breaker opening, an overload tripping, a
-coil over-voltaged, a PLC output carrying more than its rating, and a relay chattering. Voltage, current and on/off signals can all be
+coil over-voltaged, a pump asking more of its motor than its rating, a PLC output carrying more than its rating, and a relay chattering. Voltage, current and on/off signals can all be
 plotted on the Trace tab, and exported.
 
 ## What it doesn't do
@@ -140,6 +140,8 @@ plotted on the Trace tab, and exported.
   rectifier reads as the RMS value, and phase-angle control isn't modelled. A triac stays on until its current falls below holding.
 - **Parts act instantly.** Relays have no operating time and contacts don't bounce. The only delays are timers, and at most one 10 ms step per
   link in a chain of PLC, coil and valve.
+- **Motors have no starting current.** They draw their running current from the first moment, and take no time to run up.
+- **Three AC sources drawn separately are in phase here.** For three phases, label the lines `L1`, `L2` and `L3`.
 - **Nothing is destroyed.** Over-voltage is reported, but coils don't burn out, and a PLC output carrying too much carries on.
 - **Wires have no resistance**, so there's no voltage drop along them, and no fault current calculation beyond what the source's small
   resistance gives. Fuse and breaker times are indicative, not curves. **This is not a protection study.**
