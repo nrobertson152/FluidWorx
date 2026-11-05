@@ -217,8 +217,11 @@ class Inspector(ScrollFrame):
             return
         sec = Section(self.inner, "Linked to")
         sec.pack(fill="x")
-        for link in here:
-            sec.add_full(ttk.Label(sec.body, text=link.text, style="Surface.TLabel", wraplength=250, justify="left"))
+        counts = {}
+        for link in here:       # a relay with four contacts has one thing to say about them
+            counts[link.text] = counts.get(link.text, 0) + 1
+        for text, n in counts.items():
+            sec.add_full(ttk.Label(sec.body, text=f"{text} (×{n})" if n > 1 else text, style="Surface.TLabel", wraplength=250, justify="left"))
         if not here:
             sec.add_full(ttk.Label(sec.body, text="Nothing yet.", style="Faint.TLabel"))
         own = app.study.links.get(f"{part.key[0]}/{part.key[1]}", {}) if app.study is not None else {}

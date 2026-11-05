@@ -42,6 +42,9 @@ and the schematic is left alone. An analog sensor's range comes from its label (
 
 A valve with a coil can still be clicked, as a manual override. A valve without one works by clicking, as it always has.
 
+A relay's contacts all share its tag, however many there are. OpenSchematix's *Check drawing* tells identical symbols with one tag
+apart by their terminal numbers, so give each its own (`13-14`, `23-24`). The simulation goes by the tag alone.
+
 ## What makes a line live
 
 - **A source.** A battery, an AC source, a power supply, a transformer's secondary or a rectifier's output.
