@@ -1,6 +1,7 @@
 """The real window, driven under a virtual display. Skipped where there is no Tk or no display."""
 import glob
 import os
+import time
 
 import pytest
 from conftest import EXAMPLES
@@ -8,14 +9,24 @@ from conftest import EXAMPLES
 tk = pytest.importorskip("tkinter")
 
 
+def _new_root():
+    """Tk on a Windows runner sometimes won't start the moment the last one has closed. A test that skipped for that would
+    look like a pass that never ran, so try again, and if it's real, say what it was."""
+    error = None
+    for _ in range(10):
+        try:
+            return tk.Tk(className="FluidWorx")
+        except tk.TclError as e:
+            error = e
+            time.sleep(0.3)
+    pytest.skip(f"no display: {error}")
+
+
 @pytest.fixture
 def app(tmp_path):
     from fluidworx.gui.app import App
     from fluidworx.settings import Settings
-    try:
-        root = tk.Tk(className="FluidWorx")
-    except tk.TclError:
-        pytest.skip("no display")
+    root = _new_root()
     root.geometry("1400x850+0+0")
     a = App(root, None, Settings(str(tmp_path / "settings.json")))
     root.update()
@@ -361,8 +372,9 @@ def test_hovering_tells_you_what_a_part_and_a_wire_are_doing(app):
     s0 = tag(app, "S0")
     app.canvas._on_motion(event_at(app, s0.part.comp))
     assert "Hold the mouse down" in app.status.get()
-    wire = next(w for w in app.doc.wires.values() if (app.doc.uid, w.id) in app.circuit.el_wire_nodes and len(w.points) >= 2)
-    a, b = wire.points[0], wire.points[1]
+    # the middle of the longest run: a part under the pointer wins, and how far that reaches depends on the window's size
+    runs = [(a, b) for w in app.doc.wires.values() if (app.doc.uid, w.id) in app.circuit.el_wire_nodes for a, b in zip(w.points, w.points[1:])]
+    a, b = max(runs, key=lambda r: abs(r[0][0] - r[1][0]) + abs(r[0][1] - r[1][1]))
     x, y = app.canvas.to_screen(((a[0] + b[0]) / 2, (a[1] + b[1]) / 2))
     app.canvas._on_motion(type("E", (), {"x": x, "y": y})())
     assert "Line:" in app.status.get() and " V" in app.status.get()

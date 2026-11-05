@@ -1054,6 +1054,7 @@ class Logic(Part):
 class Protection(Part):
     """Conducts until the heat of an overcurrent, as (I/In)^2 seconds, opens it. All its poles together."""
     interactive = True
+    quiet = True        # it says why it opened when it does
     I2T = FUSE_I2T
     INSTANT = 0.0       # trips at once at this many times its rating
 
@@ -2125,6 +2126,7 @@ class Plc(Part):
     """An ordinary electrical part whose outputs come from a program. Its program runs on the supply at L+ and M: it
     starts cold when that comes up, and stops with its outputs off when it goes. A fault does the same, and says why."""
     interactive = True
+    quiet = True        # it logs these itself, with the reason
 
     def __init__(self, net, part):
         super().__init__(net, part)
@@ -2246,6 +2248,7 @@ class Plc(Part):
             rt.reset()
             self.fault_said = ""
             self.net.dirty = True
+            sim.log(self.part.tag, "Supply is up: program starting cold" if rt.ok else "Supply is up, but the program has errors")
         if not self.running():
             self._after_scans()
             return
@@ -2607,7 +2610,7 @@ class Network:
         self._settle()
         self.dirty = True
         for b in self.committing:
-            b.commit(self.v, self.sim.dt)
+            b.commit(self.v, 0.0)       # no time has passed yet: a timer started by this hasn't run
         self._push()
         self.dirty = True
         self.changed = True

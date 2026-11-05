@@ -258,6 +258,19 @@ def test_on_delay_timer():
     assert seconds_until(sim, lambda: not part(sim, lamp).is_on()) == pytest.approx(0.0, abs=0.03)
 
 
+def test_on_delay_timer_powered_from_the_start_takes_its_whole_delay():
+    d = Drawing()
+    src, coil, contact, lamp = d.add("el.source.dc", "G1", "24 V"), d.add("el.coil.ondelay", "KT1", "1 s"), d.add("el.contact.no.iec", "KT1"), d.add("el.lamp.iec", "H1")
+    d.wire((src, "+"), (coil, "A1"))
+    d.wire((coil, "A2"), (src, "-"))
+    d.wire((src, "+"), (contact, "1"))
+    d.wire((contact, "2"), (lamp, "1"))
+    d.wire((lamp, "2"), (src, "-"))
+    sim = d.sim()
+    assert part(sim, coil).timer == 0.0
+    assert seconds_until(sim, lambda: part(sim, lamp).is_on()) == pytest.approx(1.0, abs=0.03)
+
+
 def test_on_delay_timer_starts_again_if_interrupted():
     d, sw, lamp = timer_circuit("el.coil.ondelay")
     sim = d.sim()
@@ -1184,3 +1197,57 @@ def test_a_line_joining_the_two_sides_is_reported():
     tank, coil = d.add("fl.hyd.tank", "Z1"), d.add("el.coil.iec", "K1")
     d.wire((tank, "T"), (coil, "A1"))
     assert any("joins a fluid port" in i.text for i in d.build().issues)
+
+
+def _random_circuit(r):
+    from fluidworx.vendor.openschematix import symbols
+    electrical = [s.id for s in symbols.builtin_symbols() if s.id.startswith("el.") and symbols.geometry(s.id).terminals]
+    fluid = ["fl.hyd.pump", "fl.hyd.tank", "fl.hyd.dcv", "fl.hyd.cyl.double", "fl.hyd.relief", "fl.hyd.gauge", "fl.hyd.pressure.switch",
+             "fl.hyd.valve.prop.nc", "fl.hyd.motor"]
+    labels = ["", "24 V", "12 V 4 W", "1k", "100 uF", "10 mH", "5 s", "5 A", "230/24 V", "0-250 bar", "4-20 mA", "+24V", "0V", "L1", "L2",
+              "L3", "N", "7805", "0 V", "1000000 V"]
+    tags = ["K1", "K2", "Y1", "Y1a", "Y1b", "S1", "M1", "PT1", "A1", "F1", ""]
+    senses = ["A1 100%", "A1 0%", "A1 > 50%", "PT1 > 10 bar", "A1", "PT1", "M1 > 10 rpm", "nonsense", "A9 50%"]
+    programs = ["Q0 := I0;", "Q0 := NOT Q0;", "AO0 := AI0 * 2.0; Q1 := I1 AND I2;", "WHILE TRUE DO Q0 := TRUE; END_WHILE;", "Q0 := 1/0 > 0;"]
+    d = Drawing(sheets=2)
+    pins = []
+    for _ in range(r.randint(3, 30)):
+        symbol = r.choice(electrical) if r.random() < 0.85 else r.choice(fluid)
+        props = {"Senses": r.choice(senses)} if r.random() < 0.2 else {}
+        params = {}
+        if symbol == "el.plc" and r.random() < 0.7:
+            params = {"di": 4, "do": 3, "ai": 1, "ao": 1, "do_type": r.choice(["source", "sink", "relay"]), "tags": {},
+                      "program": {"pous": [{"name": "M", "lang": "st", "source": r.choice(programs)}]}}
+        c = d.add(symbol, r.choice(tags), r.choice(labels), params=params, props=props, sheet=1 if symbol.startswith("el.") else 0)
+        pins += [(c, t.name) for t in c.terminal_defs()]
+    for group in ([p for p in pins if p[0].symbol.startswith("el.")], [p for p in pins if p[0].symbol.startswith("fl.")]):
+        if len(group) >= 2:
+            for _ in range(int(len(group) * r.uniform(0.3, 1.2))):
+                d.wire(*r.sample(group, 2))
+    return d
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_any_nonsense_drawn_runs_without_crashing(seed):
+    """Anything can be drawn. Whatever it is, the numbers stay numbers and nothing raises."""
+    import random
+    from fluidworx.units import Units
+    r = random.Random(seed)
+    sim = _random_circuit(r).sim()
+    for _ in range(r.randint(5, 30)):
+        sim.step()
+        if r.random() < 0.3:
+            k = r.choice(list(sim.parts))
+            actions = sim.parts[k].actions()
+            if actions:
+                sim.command(k, r.choice(actions)[0])
+        if r.random() < 0.05:
+            sim.reset()
+    for b in sim.parts.values():
+        b.status(sim.p)
+        b.readings(sim.p)
+    for b in sim.net.parts:
+        b.badge(Units("metric"))
+    sim.net.terminal_currents()
+    assert all(math.isfinite(abs(x)) for x in sim.net.v)
+    assert all(math.isfinite(x) for x in sim.p)

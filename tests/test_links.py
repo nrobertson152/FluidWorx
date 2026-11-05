@@ -51,7 +51,7 @@ def test_three_phases_are_120_degrees_apart():
     import cmath
     import math
     a, b, c = (links.parse_rail(x) for x in ("L1", "L2", "L3"))
-    assert abs(a) == abs(b) == pytest.approx(230.0)
+    assert abs(a) == pytest.approx(230.0) and abs(b) == pytest.approx(230.0)
     assert math.degrees(cmath.phase(a / b)) == pytest.approx(120.0)
     assert math.degrees(cmath.phase(b / c)) == pytest.approx(120.0)
     assert abs(links.parse_rail("L1 400V") - links.parse_rail("L2 400V")) == pytest.approx(400.0)
