@@ -18,7 +18,7 @@ MODULES = ["__init__.py", "bom.py", "check.py", "commands.py", "connectivity.py"
            "geometry.py", "model.py", "netlist.py", "project.py", "projectio.py", "regions.py", "render.py",
            "revisions.py", "safejson.py", "settings.py", "shapes.py", "simlinks.py", "templates.py", "titleblock.py",
            "userlib.py", "gui/__init__.py", "gui/canvas_view.py", "gui/icons.py", "gui/interact.py",
-           "gui/theme.py", "gui/widgets.py"]
+           "gui/plc_view.py", "gui/theme.py", "gui/widgets.py"]
 
 
 def main(argv):

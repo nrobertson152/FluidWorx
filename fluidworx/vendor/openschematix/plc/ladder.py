@@ -7,6 +7,10 @@
 
 Operands are ST expressions, so a contact can read a tag, ``T1.Q`` or a whole condition. A name that nobody
 declared becomes an internal marker (a BOOL), as on most PLCs.
+
+While it runs, each element notes the power that entered and left it, in Program.power[program name], keyed by where it is in
+the rung: (path, index), where a path is (rung,) and a branch adds (element, branch). A display reads that. It's what the
+scan really did, not a second opinion worked out afterwards.
 """
 from __future__ import annotations
 
@@ -78,9 +82,10 @@ def compile_pou(source, ctx, program, pou):
     comp = Compiler(ctx, program, program.scope, pou)
     counter = [0]
     rungs = []
+    power = program.power.setdefault(pou, {})
     for i, rung in enumerate(rungs_of(source), 1):
         try:
-            rungs.append(_series(rung.get("items", []), comp, ctx, frame, counter))
+            rungs.append(_series(rung.get("items", []), comp, ctx, frame, counter, power, (i - 1,)))
         except CompileError as e:
             raise CompileError(f"rung {i}: {e.message}", 0, pou) from None
     if not rungs:
@@ -107,8 +112,16 @@ def _target(text, comp, what):
     return comp.writer(node)
 
 
-def _series(items, comp, ctx, frame, counter):
-    fs = [_element(el, comp, ctx, frame, counter) for el in items]
+def _probe(f, power, key):
+    def probed(L, p):
+        out = f(L, p)
+        power[key] = (bool(p), bool(out))
+        return out
+    return probed
+
+
+def _series(items, comp, ctx, frame, counter, power, path):
+    fs = [_probe(_element(el, comp, ctx, frame, counter, power, path, i), power, (path, i)) for i, el in enumerate(items)]
     if not fs:
         return lambda L, p: p
     if len(fs) == 1:
@@ -121,10 +134,10 @@ def _series(items, comp, ctx, frame, counter):
     return run
 
 
-def _element(el, comp, ctx, frame, counter):
+def _element(el, comp, ctx, frame, counter, power, path, index):
     t = el.get("t")
     if t == "par":
-        branches = [_series(b, comp, ctx, frame, counter) for b in el["branches"]]
+        branches = [_series(b, comp, ctx, frame, counter, power, path + ((index, n),)) for n, b in enumerate(el["branches"])]
 
         def run_par(L, p):
             out = False

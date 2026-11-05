@@ -24,7 +24,7 @@ from ..vendor.openschematix.gui import theme as th
 from ..vendor.openschematix.gui.widgets import IconButton, ToastHost, ToolbarSeparator, Tooltip, set_current_theme
 from . import icons_extra  # noqa: F401  (registers FluidWorx's icons)
 from .dialogs import AboutDialog, CalderaImportDialog, PreferencesDialog, RevisionDialog, ShortcutsDialog
-from .panels import ChecksPanel, CircuitPanel, EventsPanel, FaultsPanel, Inspector, LinksPanel, TracePanel
+from .panels import ChecksPanel, CircuitPanel, EventsPanel, FaultsPanel, Inspector, LinksPanel, ProgramPanel, TracePanel
 from .simcanvas import SimCanvas
 
 FILETYPES_ALL = [("FluidWorx and OpenSchematix files", "*.fluidworx *.schematix *.osch"),
@@ -148,11 +148,14 @@ class App:
         self.checks_panel = ChecksPanel(self.dock, self)
         self.links_panel = LinksPanel(self.dock, self)
         self.faults_panel = FaultsPanel(self.dock, self)
+        self.program_panel = ProgramPanel(self.dock, self)
         self.dock.add(self.trace_panel, text="Trace")
         self.dock.add(self.events_panel, text="Events")
         self.dock.add(self.checks_panel, text="Checks")
         self.dock.add(self.links_panel, text="Links")
         self.dock.add(self.faults_panel, text="Faults")
+        self.dock.add(self.program_panel, text="Program")
+        self.dock.hide(self.program_panel)      # there's no PLC yet
         self.vpane.add(self.dock, weight=2)
         self.right = ttk.Notebook(self.hpane)
         self.inspector = Inspector(self.right, self)
@@ -533,6 +536,11 @@ class App:
         self.checks_panel.rebuild()
         self.links_panel.rebuild()
         self.faults_panel.rebuild()
+        self.program_panel.rebuild()
+        if c.electrical_parts and self.sim.net.plcs:
+            self.dock.add(self.program_panel)
+        else:
+            self.dock.hide(self.program_panel)
         self.show_sheet(was_sheet if was_sheet in c.sheets else c.sheets[0])
         self._update_check_label()
         self._update_fault_label()
@@ -693,6 +701,12 @@ class App:
         self.sim.run(0.1)
         self._after_run(0.1)
         self._refresh_views(force=True)
+
+    def show_program(self, key):
+        """The Program tab, on this PLC."""
+        self.program_panel.show_plc(key)
+        self.dock.select(self.program_panel)
+        self.program_panel.refresh()
 
     def reset(self):
         if self.sim is None:
@@ -884,6 +898,8 @@ class App:
         self.inspector.refresh()
         self.events_panel.update_events()
         self._say_races()
+        if self.dock.select() == str(self.program_panel):
+            self.program_panel.refresh()
         if self.running:
             self.rt_label.configure(text=f"{self._rt_factor:.2f}× real time")
         else:

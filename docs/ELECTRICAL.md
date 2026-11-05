@@ -83,6 +83,9 @@ OpenSchematix's `docs/PLC.md`. In FluidWorx:
   **Analog outputs** are 1 Ω voltage sources or current sources.
 - A fault, such as a division by zero or an endless loop, stops the PLC and drops its outputs, and the reason is in the Events tab.
   Properties has **Stop/Run** and **Restart**, and the live value of every input, output and variable.
+- **The Program tab shows it running.** Ladder rungs are lit as far as the power really went in the last scan, so a contact past an open one is dark however its input
+  stands. A timer shows its elapsed time and a counter its count. Function blocks are lit by the signals on their wires, and charts by their active steps. Structured text, C and
+  Python have nothing to light: the text is there, with the variables alongside. It's read-only: edit a program in OpenSchematix.
 - A program with errors doesn't run. The errors are in the Checks tab.
 
 ## What's modelled

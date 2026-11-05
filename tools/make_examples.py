@@ -306,14 +306,16 @@ def pneumatic_single():
 
 
 DOWN = {"rot": 270, "mirror": True}      # a two-terminal part drawn with terminal 1 at the top
-ST_CYCLE = """(* Press Start with the rod home to extend it. At the end of its stroke, or if the pressure
-   says it has met something, it comes back on its own. *)
-IF Start AND AtHome THEN Extending := TRUE; END_IF;
-IF AtEnd OR Pressure > 90.0 THEN Extending := FALSE; END_IF;
-Extend := Extending;
-Retract := NOT Extending AND NOT AtHome;
-Moving := Extend OR Retract;
-"""
+RUNGS = [
+    {"comment": "Press Start with the rod home to extend it", "items": [
+        {"t": "no", "a": "Start"}, {"t": "no", "a": "AtHome"}, {"t": "set", "a": "Extending"}]},
+    {"comment": "It comes back at the end of its stroke, or if the pressure says it has met something", "items": [
+        {"t": "par", "branches": [[{"t": "no", "a": "AtEnd"}], [{"t": "cmp", "a": "Pressure", "op": ">", "b": "90.0"}]]},
+        {"t": "reset", "a": "Extending"}]},
+    {"comment": "", "items": [{"t": "no", "a": "Extending"}, {"t": "coil", "a": "Extend"}]},
+    {"comment": "", "items": [{"t": "nc", "a": "Extending"}, {"t": "nc", "a": "AtHome"}, {"t": "coil", "a": "Retract"}]},
+    {"comment": "", "items": [{"t": "par", "branches": [[{"t": "no", "a": "Extend"}], [{"t": "no", "a": "Retract"}]]}, {"t": "coil", "a": "Moving"}]},
+]
 
 
 def cylinder_sheet(b, tag_valve, label="50/28x200", flow="10 L/min", relief="100 bar"):
@@ -355,7 +357,7 @@ def plc_cylinder():
               "tags": {"I0": "Start", "I1": "AtHome", "I2": "AtEnd", "AI0": "Pressure", "Q0": "Extend", "Q1": "Retract", "Q2": "Moving"},
               "program": {"scan_ms": 10, "io": {"AI0": {"signal": "0-10V", "lo": 0, "hi": 250, "note": "PT1, bar"}},
                           "vars": [{"name": "Extending", "type": "BOOL", "init": "", "note": "the rod is on its way out"}],
-                          "pous": [{"name": "Cycle", "lang": "st", "source": ST_CYCLE}]}}
+                          "pous": [{"name": "Cycle", "lang": "ld", "source": {"rungs": RUNGS}}]}}
     plc = b.part("el.plc", 640, 340, "PLC1", params=params)
     pins = plc.terminals()
     start = b.part("el.pushbutton.no.iec", 360, 190, "S0", "Start")

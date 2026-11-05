@@ -155,6 +155,7 @@ class Program:
         self.tags = tags_of(params)
         self._auto: list = []
         self._steps_by_pou: dict = {}
+        self.power: dict = {}           # ladder programs: what each element did with its power in the last scan
 
     @property
     def errors(self):
@@ -529,6 +530,8 @@ class Runtime:
         ctx.depth = 0
         ctx.dt_ms = self.program.scan_ms
         self.running = self.ok
+        for flow in self.program.power.values():
+            flow.clear()
         if not self.ok:
             return
         G = ctx.G
