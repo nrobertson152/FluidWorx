@@ -61,8 +61,15 @@ def test_legacy_osch_and_multisheet_project_from_openschematix():
     sim.run(4.0)
     assert sim.actuators()[0].fraction == 1.0
     d = load(os.path.join(data, "demo_project.schematix"))
-    assert len(d.sheets) == 1 and len(d.skipped_sheets) == 2      # electrical sheets aren't simulated, and say so
-    assert any("24 V supply" in i.text for i in d.issues)
+    assert len(d.sheets) == 3 and not d.skipped_sheets      # hydraulics and its electrical sheets, all of it simulated
+    assert {p.medium for p in d.parts} == {"hyd", "el"}
+    sim = engine.Simulator(d)
+    sim.run(0.05)
+    lamp, coil = next(b for b in sim.parts.values() if b.part.tag == "H2"), next(b for b in sim.parts.values() if b.part.kind == "coil")
+    assert not lamp.is_on() and not coil.energised
+    sim.command(next(b for b in sim.parts.values() if b.part.tag == "S2").part.key, "press")      # start
+    sim.run(0.05)
+    assert lamp.is_on() and coil.energised
 
 
 def test_sheet_connectors_join_a_line_across_sheets():
@@ -94,7 +101,7 @@ def test_sheet_connectors_join_a_line_across_sheets():
 def test_custom_fluid_symbol_is_warned_about_not_guessed():
     from fluidworx import catalog
     assert catalog.classify("user:my-valve").kind == "unsupported"
-    assert catalog.classify("el.coil.iec").kind == "unsupported"
+    assert catalog.classify("el.something.new").kind == "unsupported"
 
 
 def test_study_params_overlay(examples_dir):

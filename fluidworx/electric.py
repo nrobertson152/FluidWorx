@@ -2026,7 +2026,9 @@ class Plc(Part):
         return max(self.par["supply"], 1.0)
 
     def _supply(self, v):
-        return mag(v[self.t["L+"]] - v[self.t["M"]])
+        """L+ above M. The wrong way round is no supply at all, as it is for a real PLC."""
+        d = v[self.t["L+"]] - v[self.t["M"]]
+        return abs(d) if isinstance(d, complex) else d
 
     def running(self) -> bool:
         return self.powered and self.switch_run and self.rt.running
@@ -2148,7 +2150,9 @@ class Plc(Part):
         if not self.rt.ok:
             return "Program has errors: it can't run"
         if not self.powered:
-            return "No supply" if self.has_supply else "No supply: nothing is wired to L+ and M"
+            if not self.has_supply:
+                return "No supply: nothing is wired to L+ and M"
+            return "Supply the wrong way round" if self._supply(self.net.v) < -1.0 else "No supply"
         if self.rt.fault:
             return "Fault: " + self.rt.fault[:60]
         return "Run" if self.switch_run else "Stop"
@@ -2257,7 +2261,9 @@ class Network:
         self.outputs = []       # (coil or motor, fluid part, side or None)
         self._pushed = {}
         self._link_up(circuit.links)
-        self._rounds = 2 * len(self.coils) + 2 * len(self.logic) + 8
+        # odd, so that logic oscillating every round is seen to oscillate rather than looking still at every step's end
+        self._rounds = 2 * len(self.coils) + 2 * len(self.logic) + 9
+        self._oscillation_said = False
 
     # ---- construction
     def new_node(self) -> int:
@@ -2401,6 +2407,9 @@ class Network:
             calm = False
         else:
             calm = False
+            if self.logic and not self._oscillation_said:
+                self._oscillation_said = True
+                self.sim.log(self.logic[0].part.tag, "Logic oscillating: the gates keep changing each other")
         waiting = any(c.wants_flip(self.v) for c in self.coils)
         self.dirty = self.dirty or not calm or waiting
 
@@ -2432,6 +2441,7 @@ class Network:
     def restart(self):
         self.v = [0.0] * self.node_count
         self._pushed = {}
+        self._oscillation_said = False
         self._nominal = None
         self.dirty = False
         self._settle()

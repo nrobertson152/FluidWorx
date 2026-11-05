@@ -359,7 +359,7 @@ def build(project, warnings=(), overrides=None) -> Circuit:
         _circuit_checks(fluid, fixed, issues)
         node_medium = {n: ("hyd" if "hyd" in m else "pneu") for n, m in node_medium.items()}
         electric = _electric_nodes(project, parts, nets, term_net, wire_net, issues)
-        _electrical_checks(parts, issues)
+        _electrical_checks(parts, issues, electric)
         found = links_mod.resolve(parts, issues, Issue)
     if skipped:
         issues.append(Issue("info", "Nothing to simulate on: " + ", ".join(skipped) + "."))
@@ -547,7 +547,7 @@ def _electric_nodes(project, parts, nets, term_net, wire_net, issues) -> dict:
                 el_rails=rail_entries, el_vnom=vnom, el_circuit_of=circuit_of)
 
 
-def _electrical_checks(parts: list, issues: list) -> None:
+def _electrical_checks(parts: list, issues: list, electric: dict) -> None:
     el = [p for p in parts if p.medium == "el"]
     if not el:
         return
@@ -559,10 +559,8 @@ def _electrical_checks(parts: list, issues: list) -> None:
                 issues.append(Issue("error" if d.level == "error" else "warning", f"{p.tag} program: {d}", p.key))
             if "L+" in p.open_terms and "M" in p.open_terms:
                 issues.append(Issue("warning", f"{p.tag}: nothing is wired to L+ and M, so it has no supply and won't run.", p.key))
-    sources = [p for p in el if p.kind in _SOURCES + ("rail",)]
-    points = [p for p in el if p.kind == "point" and links_mod.parse_rail(p.comp.label or p.comp.designator) is not None]
-    if not sources and not points:
-        needs = [p for p in el if p.kind not in ("point", "ground", "feedthrough")]
+    if not electric.get("el_rails") and not any(p.kind in _SOURCES for p in el):
+        needs = [p for p in el if p.kind not in ("point", "ground", "feedthrough", "rail")]
         if needs:
             issues.append(Issue("info", "No electrical source was found. Add one, or label a connection +24V and 0V "
                                         "(or L1, L2, L3, N), and those lines are live."))

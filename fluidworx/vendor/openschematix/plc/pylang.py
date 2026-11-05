@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 
-from .core import (FB_TYPES, MAX_ARRAY, MAX_CALL_DEPTH, CompileError, Fb, PlcFault, _checked, scale)
+from .core import (FB_TYPES, MAX_ARRAY, MAX_CALL_DEPTH, MAX_NEST, CompileError, Fb, PlcFault, _checked, scale)
 
 BREAK, CONTINUE, RETURN = 1, 2, 3
 RET = "$ret"
@@ -921,8 +922,73 @@ def _prescan_names(tree, comp):
                     comp.global_names.add(a.name)
 
 
+# Python's own parser builds a tree as deep as the source says, on the C stack, and in some versions nothing stops it:
+# `x = 1 + 1 + 1 ...` fifty thousand terms long takes the whole program down, and no `except` can catch that. So a
+# source that would build a very deep tree is turned down before it reaches the parser.
+MAX_CHAIN = 1000        # operators in a row in one expression; the parser is safe to well over ten times this
+MAX_ELIF = 1000
+_CHAINS = frozenset(("not", "and", "or", "in", "is", "if", "else", "lambda", "await"))
+_OPERATORS = r"\*\*|//|<<|>>|==|!=|<=|>=|[-+*/%@&|^~<>.]"
+_OPERATOR = re.compile(_OPERATORS)
+_SCAN = re.compile(r"""
+    (?P<comment>\#[^\n]*)
+  | (?P<string>(?P<prefix>[A-Za-z]{0,2})(?:\'\'\'(?:[^\\]|\\.)*?\'\'\'|\"\"\"(?:[^\\]|\\.)*?\"\"\"
+                                         |'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"))
+  | (?P<number>\.?\d[\w.]*)
+  | (?P<word>[^\W\d]\w*)
+  | (?P<open>[(\[{])
+  | (?P<close>[)\]}])
+  | (?P<comma>,)
+  | (?P<joined>\\\r?\n)
+  | (?P<end>[\n;])
+  | (?P<op>""" + _OPERATORS + r""")
+""", re.X | re.S)
+
+
+def check_depth(src: str, pou: str = "") -> None:
+    """Raises CompileError if parsing this source could overflow the stack. Costs nothing a real program would notice,
+    and turns down nothing a real program would contain: a table of ten thousand numbers is not deep."""
+    outer = []
+    count = peak = elifs = 0
+    for m in _SCAN.finditer(src):
+        kind = m.lastgroup
+        if kind == "op":
+            count += 1
+        elif kind == "word":
+            word = m.group()
+            if word in _CHAINS:
+                count += 1
+            elif word == "elif":
+                elifs += 1
+                if elifs > MAX_ELIF:
+                    raise CompileError(f"more than {MAX_ELIF} elif branches: use a table or a function instead",
+                                       src.count("\n", 0, m.start()) + 1, pou)
+        elif kind == "string":
+            if "f" in m.group("prefix").lower():
+                count += len(_OPERATOR.findall(m.group()))
+        elif kind == "open":
+            if len(outer) >= MAX_NEST:
+                raise CompileError("brackets are nested too deeply", src.count("\n", 0, m.start()) + 1, pou)
+            outer.append((count, peak))
+            count = peak = 0
+        elif kind == "close":
+            if outer:
+                inner = max(peak, count) + 1
+                count, peak = outer.pop()
+                count += inner
+        elif kind == "comma":
+            peak = max(peak, count)
+            count = 0
+        elif kind == "end" and not outer:
+            count = peak = 0
+        if count > MAX_CHAIN:
+            raise CompileError(f"this expression is too long: more than {MAX_CHAIN} operators one after another",
+                               src.count("\n", 0, m.start()) + 1, pou)
+
+
 def compile_unit(src: str, ctx, program, pou: str):
     """(module variables, run once at start, setup or None, run every scan)."""
+    check_depth(src, pou)
     try:
         tree = ast.parse(src)
     except SyntaxError as e:
