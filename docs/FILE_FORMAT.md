@@ -38,4 +38,4 @@ A reader refuses a higher `version` and asks the user to update; it never guesse
 Saving writes a temporary file in the destination folder, reads it back and verifies it, then renames it over the
 old file. An interrupted save leaves the previous file intact.
 
-RevisionWorx versions a `.fluidworx` byte for byte, like any other file.
+RevisionWorx recognizes a `.fluidworx` by its `mimetype` member and versions it byte for byte, as a "Simulation study" document.

@@ -185,3 +185,21 @@ def test_self_test_passes():
     r = subprocess.run([sys.executable, "-m", "fluidworx", "--self-test"], capture_output=True, text=True,
                        cwd=os.path.dirname(os.path.dirname(__file__)))
     assert r.returncode == 0 and "PASSED" in r.stdout, r.stdout + r.stderr
+
+
+def test_packaged_build_does_not_leak_its_libraries():
+    env = {"TCL_LIBRARY": "/x", "LD_LIBRARY_PATH": "/bundle", "LD_LIBRARY_PATH_ORIG": "/orig", "A": "1"}
+    out = tools.child_environment(env, frozen=True)
+    assert out["LD_LIBRARY_PATH"] == "/orig" and "TCL_LIBRARY" not in out and out["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert tools.child_environment(env, frozen=False) == env
+
+
+def test_commands_survive_having_no_console(monkeypatch, tmp_path):
+    """A windowed Windows build has sys.stdout = None; printing must not crash it."""
+    from fluidworx import cli
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    report_path = tmp_path / "r.txt"
+    assert cli.main(["--self-test", str(report_path)]) == 0
+    assert "PASSED" in report_path.read_text()
+    assert cli.main(["--version"]) == 0

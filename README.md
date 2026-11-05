@@ -36,8 +36,8 @@ useful you can optionally [support development on Ko-fi](https://ko-fi.com/nr270
 
 | Program | What FluidWorx does with it |
 |---|---|
-| **OpenSchematix** | *Connect ▸ Edit schematic* opens your drawing. Save it there and FluidWorx offers to reload, keeping your values. |
-| **RevisionWorx** | Shows which revision you're simulating, by comparing content hashes, and warns if the file matches none. Registers, checks out and checks in studies through RevisionWorx's own command line, next to the schematic's project. |
+| **OpenSchematix** | *Tools ▸ Simulate in FluidWorx* there opens the saved project here. *Connect ▸ Edit schematic* here opens your drawing. Save it there and FluidWorx offers to reload, keeping your values. |
+| **RevisionWorx** | Shows which revision you're simulating, by comparing content hashes, and warns if the file matches none. Registers, checks out and checks in studies through RevisionWorx's own command line, next to the schematic's project. RevisionWorx recognizes `.fluidworx` files by content. |
 | **Caldera** | *Send calculations to Caldera* writes a `.caldera` project with each cylinder as a saved calculation, noting the simulated stroke times. *Use values from a Caldera project* applies saved sizes to the selected part. |
 
 None of them is needed to run FluidWorx. It finds them on your `PATH`, or set their locations in *Preferences*.
@@ -56,7 +56,9 @@ python -m fluidworx [circuit.schematix | drawing.osch | study.fluidworx]
 To check that a copy works: `python -m fluidworx --self-test`. To see what would be simulated without opening a window:
 `python -m fluidworx --check circuit.schematix`.
 
-Windows and Linux builds can be made with `packaging/build_windows.bat` and `packaging/build_linux.sh`.
+**Packages:** each push builds a Windows installer and portable zip, and a Linux AppImage and tar.gz, under the
+*Build packages* workflow on GitHub Actions. To build them yourself, use `packaging/build_windows.bat`, or
+`packaging/build_linux.sh` and `packaging/build_appimage.sh`.
 
 ## Quick start
 

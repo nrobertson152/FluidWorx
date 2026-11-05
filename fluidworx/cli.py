@@ -23,17 +23,24 @@ def _load(path):
     return c
 
 
+def _say(text="", err=False):
+    """Print if there is anywhere to print to: a windowed Windows build has no console at all."""
+    stream = sys.stderr if err else sys.stdout
+    if stream is not None:
+        print(text, file=stream)
+
+
 def check(path) -> int:
     from .circuit import CircuitError
     from .study import StudyError
     try:
         c = _load(path)
     except (CircuitError, StudyError) as e:
-        print(e, file=sys.stderr)
+        _say(e, err=True)
         return 2
-    print(f"{len(c.parts)} fluid parts on {len(c.sheets)} sheet(s), {c.node_count - 1} lines.")
+    _say(f"{len(c.parts)} fluid parts on {len(c.sheets)} sheet(s), {c.node_count - 1} lines.")
     for i in c.issues:
-        print(f"{i.level}: {i.text}")
+        _say(f"{i.level}: {i.text}")
     return 1 if any(i.level == "error" for i in c.issues) else 0
 
 
@@ -69,17 +76,20 @@ def self_test(report) -> int:
     if report:
         with open(report, "w", encoding="utf-8") as f:
             f.write(text)
-    print(text, end="")
+    _say(text.rstrip("\n"))
     return 0 if ok else 1
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="fluidworx", description="Hydraulic and pneumatic circuit simulator")
     ap.add_argument("file", nargs="?", help=".schematix, .osch or .fluidworx file to open")
-    ap.add_argument("--version", "-V", action="version", version=f"{APP_NAME} {VERSION}")
+    ap.add_argument("--version", "-V", action="store_true", help="show the version")
     ap.add_argument("--check", metavar="FILE", help="report what would be simulated, without a window")
     ap.add_argument("--self-test", nargs="?", const="", metavar="REPORT", help="check this install works")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.version:
+        _say(f"{APP_NAME} {VERSION}")
+        return 0
     if args.check:
         return check(args.check)
     if args.self_test is not None:
@@ -87,7 +97,7 @@ def main(argv=None) -> int:
     try:
         import tkinter  # noqa: F401
     except ImportError:
-        print("FluidWorx needs Tkinter (Debian/Ubuntu: sudo apt install python3-tk).", file=sys.stderr)
+        _say("FluidWorx needs Tkinter (Debian/Ubuntu: sudo apt install python3-tk).", err=True)
         return 3
     from .gui.app import main as gui_main
     return gui_main(args.file)
