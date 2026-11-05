@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 
 from .circuit import Circuit, Part
-from .electric import BEHAVIOURS as ELECTRIC_BEHAVIOURS, Failable, Network
+from .electric import BEHAVIOURS as ELECTRIC_BEHAVIOURS, Failable, Network, Reader
 from .linsolve import System, solve
 from .vendor.openschematix.symbols.fluid import LAYOUTS, PATTERNS, VALVE_TYPES, normal_position
 
@@ -23,6 +23,7 @@ DT = 0.01               # time step, s
 TOL = 50.0              # Pa: pressure hysteresis of seats
 FLOW_EPS = 1e-8         # m^3/s (0.0006 L/min): below this nothing is flowing
 MOVE_EPS = 1e-5         # m/s: below this an actuator reads as stopped
+ROLLER_BAND = 0.01      # of the stroke: how long a roller stays on a cam at one place
 
 # Constants of the model, per medium. G = conductance (m^3/s per Pa).
 MEDIUM = {
@@ -844,7 +845,8 @@ class Valve(Behaviour):
         self.position = self.normal
         self.cmd = {"left": False, "right": False}
         self.sol = {"left": False, "right": False}      # energised by a coil on the electrical sheet
-        self.wired = set()                              # sides that have such a coil
+        self.roller = {"left": False, "right": False}   # held over by the machine, on a roller or a cam
+        self.wired = set()                              # sides that have such a coil or roller
         geom = part.comp.geometry()
         ports = set(self.layout)
         self.pilot_terms = {"left": [], "right": []}
@@ -877,9 +879,15 @@ class Valve(Behaviour):
             self._apply()
             self.sim.touch()
 
+    def set_roller(self, side, on):
+        if self.roller[side] != on:
+            self.roller[side] = on
+            self._apply()
+            self.sim.touch()
+
     def target_position(self):
-        left = self.cmd["left"] or self.pilot_active["left"] or self.sol["left"]
-        right = self.cmd["right"] or self.pilot_active["right"] or self.sol["right"]
+        left = self.cmd["left"] or self.pilot_active["left"] or self.sol["left"] or self.roller["left"]
+        right = self.cmd["right"] or self.pilot_active["right"] or self.sol["right"] or self.roller["right"]
         if self.npos == 3:
             if left and not right:
                 return 0
@@ -911,6 +919,7 @@ class Valve(Behaviour):
         self.position = self.normal
         self.cmd = {"left": False, "right": False}
         self.sol = {"left": False, "right": False}
+        self.roller = {"left": False, "right": False}
         self.pilot_active = {"left": False, "right": False}
         self._configure()
 
@@ -930,7 +939,8 @@ class Valve(Behaviour):
             if self.side_can_actuate(side):
                 ops = self.left if side == "left" else self.right
                 op = next((o for o in ops if o not in _MANUAL_OPS_EXCLUDED), "")
-                label = {"solenoid": "solenoid", "lever": "lever", "pilot": "pilot"}.get(op, "operator")
+                label = {"solenoid": "solenoid", "lever": "lever", "pilot": "pilot", "roller": "roller", "roller.lever": "roller",
+                         "cam": "cam", "plunger": "plunger", "plunger.limited": "plunger"}.get(op, "operator")
                 if side in self.wired:
                     label += ", manual override"
                 out.append((side, f"{word} {label}", self.cmd[side]))
@@ -1264,6 +1274,11 @@ class Simulator:
         self.parts = dict(self.fluid)
         self.net = Network(self, circuit)
         self.parts.update(self.net.by_key)
+        self.rollers = []           # (what it reads, the valve, which side)
+        for link in circuit.links:
+            if link.kind == "roller" and link.source in self.fluid and link.target in self.fluid:
+                self.fluid[link.target].wired.add(link.side)
+                self.rollers.append((Reader(self.net, link), self.fluid[link.target], link.side))
         self.cavitation = []        # seats that stop a node going below vacuum
         seen = set()
         for b in self.parts.values():
@@ -1294,6 +1309,9 @@ class Simulator:
             b.reset()
         for seat, *_ in self.cavitation:
             seat.open = False
+        for reader, _valve, _side in self.rollers:
+            reader.reset()
+        self._read_rollers()        # a roller already on its cam at the start holds its valve over from the start
         for key in self.faults:
             b = self.parts[key]
             self.log(b.part.tag, f"Failed on purpose, from the start: {b.fault_name()}")
@@ -1403,6 +1421,10 @@ class Simulator:
             del self.events[:1000]
 
     # ---- stepping
+    def _read_rollers(self):
+        for reader, valve, side in self.rollers:
+            valve.set_roller(side, reader.tripped(ROLLER_BAND))
+
     def _solve_once(self, p_old, caps):
         s = System(self)
         for node in self.free:
@@ -1429,6 +1451,7 @@ class Simulator:
 
     def step(self):
         """Advance one time step: first the electrical side and any PLC, then the fluid they operate."""
+        self._read_rollers()
         self.net.step(self.dt)
         if self._idle:
             self.time += self.dt

@@ -271,6 +271,7 @@ class App:
                 ("accumulator_circuit.schematix", "Accumulator charging and unloading"),
                 ("pneumatic_cylinder.schematix", "Pneumatic cylinder, 5/2 valve with speed control"),
                 ("pneumatic_single_acting.schematix", "Pneumatic single-acting cylinder, 3/2 valve"),
+                ("pneumatic_sequence.schematix", "Pneumatic sequence: A+ B+ A- B- on roller valves"),
                 ("plc_cylinder.schematix", "PLC running a cylinder, with position and pressure feedback"),
                 ("relay_latch.schematix", "Relay logic: start, stop and automatic return"),
                 ("motor_starter_pump.schematix", "Three-phase starter driving a hydraulic pump"),

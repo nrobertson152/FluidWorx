@@ -258,6 +258,41 @@ def pneumatic():
     b.save("pneumatic_cylinder.schematix")
 
 
+def pneumatic_sequence():
+    """Two cylinders, A+ B+ A- B-, with nothing electrical: each roller valve at the end of a stroke starts the next one."""
+    b = B("Pneumatic sequence: A+ B+ A- B- on roller valves")
+    a, c = b.part("fl.pneu.cyl.double", 400, 120, "A", "40/16x100", props={"Load": "100"}), b.part("fl.pneu.cyl.double", 860, 120, "B", "40/16x100", props={"Load": "100"})
+    dcv = {"medium": "pneu", "type": "5/2", "positions": ["1-4", "1-2"], "left": ["pilot"], "right": ["pilot"]}
+    va, vb = b.part("fl.pneu.dcv", 400, 280, "V1", params=dcv), b.part("fl.pneu.dcv", 860, 280, "V2", params=dcv)
+    roller = {"medium": "pneu", "type": "3/2", "positions": ["P-A", "A-T"], "left": ["roller"], "right": ["spring"]}
+    a1, b0 = b.part("fl.pneu.dcv", 700, 500, "a1", params=roller), b.part("fl.pneu.dcv", 220, 500, "b0", params=roller)
+    b1, a0 = b.part("fl.pneu.dcv", 560, 500, "b1", params=roller), b.part("fl.pneu.dcv", 1040, 500, "a0", params=roller)
+    start = b.part("fl.pneu.dcv", 220, 380, "S1", "Start", params={**roller, "left": ["pushbutton"]})
+    comp = b.part("fl.pneu.compressor", 120, 650, "P1", "6 bar", rot=90)
+    supply = comp.terminals()["2"][1]
+    b.line((comp.terminals()["2"][0], supply), (a0.terminals()["1"][0], supply))
+    for v in (va, vb, a1, b0, b1, a0):
+        pin = v.terminals()["1"]
+        b.tee(v, "1", (pin[0], supply))
+    # the cylinders
+    for v, cyl, y0, y1 in ((va, a, 200, 180), (vb, c, 200, 180)):
+        t = v.terminals()
+        b.wire(v, "4", cyl, "A", via=[(t["4"][0], y0), (cyl.terminals()["A"][0], y0)])
+        b.wire(v, "2", cyl, "B", via=[(t["2"][0], y1), (cyl.terminals()["B"][0], y1)])
+    # b0 and the start button in series drive A+: the sequence starts only with B home
+    t = start.terminals()
+    b.wire(b0, "2", start, "1", via=[(b0.terminals()["2"][0], 430), (t["1"][0], 430)])
+    b.wire(start, "2", va, "14", via=[(t["2"][0], 320), (va.terminals()["14"][0] - 20, 320), (va.terminals()["14"][0] - 20, va.terminals()["14"][1])])
+    # a1 drives B+, b1 drives A-, a0 drives B-
+    p = a1.terminals()["2"]
+    b.wire(a1, "2", vb, "14", via=[(p[0], 400), (vb.terminals()["14"][0] - 20, 400), (vb.terminals()["14"][0] - 20, vb.terminals()["14"][1])])
+    p = b1.terminals()["2"]
+    b.wire(b1, "2", va, "12", via=[(p[0], 360), (va.terminals()["12"][0] + 20, 360), (va.terminals()["12"][0] + 20, va.terminals()["12"][1])])
+    p = a0.terminals()["2"]
+    b.wire(a0, "2", vb, "12", via=[(p[0], 400), (vb.terminals()["12"][0] + 20, 400), (vb.terminals()["12"][0] + 20, vb.terminals()["12"][1])])
+    b.save("pneumatic_sequence.schematix")
+
+
 def pneumatic_single():
     b = B("Pneumatic single-acting cylinder, 3/2 valve")
     cyl = b.part("fl.pneu.cyl.single", 560, 170, "A1", "32x80")
@@ -523,6 +558,7 @@ def main():
     motor()
     accumulator()
     pneumatic()
+    pneumatic_sequence()
     pneumatic_single()
     plc_cylinder()
     relay_latch()
