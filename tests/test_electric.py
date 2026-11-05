@@ -1251,3 +1251,151 @@ def test_any_nonsense_drawn_runs_without_crashing(seed):
     sim.net.terminal_currents()
     assert all(math.isfinite(abs(x)) for x in sim.net.v)
     assert all(math.isfinite(x) for x in sim.p)
+
+
+# ---------------------------------------------------------------- races
+def races(sim):
+    return [text for _t, _tag, text in sim.events if text.startswith("Race:")]
+
+
+def test_an_interlock_race_says_so():
+    """Either relay could win on a real machine, so a result that shows one winner has to say that."""
+    d = Drawing()
+    interlock(d, "K1", "K2")
+    sim = d.sim()
+    said = races(sim)
+    assert len(said) == 1
+    assert "K1 and K2" in said[0] and "drawn first" in said[0] and "either way" in said[0]
+    assert sim.net.races == [(0.0, "K1", "K2")]
+
+
+def test_the_warning_follows_the_drawing_order():
+    d = Drawing()
+    k2, k1 = interlock(d, "K2", "K1")
+    sim = d.sim()
+    sim.run(0.2)
+    assert part(sim, k2).energised and not part(sim, k1).energised
+    assert "K2 and K1" in races(sim)[0]
+
+
+def test_a_race_is_said_once_a_run_and_again_after_a_reset():
+    d = Drawing()
+    interlock(d, "K1", "K2")
+    sim = d.sim()
+    sim.run(0.5)
+    assert len(races(sim)) == 1
+    sim.reset()
+    sim.run(0.5)
+    assert len(races(sim)) == 1
+
+
+def test_trying_the_other_order_leaves_nothing_behind():
+    """The other order is only looked at. It doesn't change who won, what they read, or how often they've flipped."""
+    d = Drawing()
+    k1, k2 = interlock(d, "K1", "K2")
+    sim = d.sim()
+    assert part(sim, k1).flip_times == [0.0] and part(sim, k2).flip_times == []
+    assert part(sim, k1).energised and not part(sim, k2).energised
+    assert not sim.net.what_if
+    # K1's NC contact has opened in K2's circuit, and K2 has nothing across it
+    assert part(sim, k2).volts(sim.net.v) == pytest.approx(0.0, abs=0.01)
+    assert part(sim, k1).volts(sim.net.v) == pytest.approx(24.0, abs=0.1)
+
+
+def test_relays_that_only_share_a_supply_dont_race():
+    d = Drawing()
+    src, button = d.add("el.source.dc", "G1", "24 V"), d.add("el.pushbutton.no.iec", "S1")
+    d.wire((src, "+"), (button, "1"))
+    coils = [d.add("el.coil.iec", f"K{i}") for i in range(4)]
+    for coil in coils:
+        d.wire((button, "2"), (coil, "A1"))
+        d.wire((coil, "A2"), (src, "-"))
+    sim = d.sim()
+    sim.command(part(sim, button).part.key, "press")
+    sim.run(0.1)
+    assert all(part(sim, c).energised for c in coils)
+    assert races(sim) == []
+
+
+def _one_way(d):
+    """A button feeds K1 directly, and K2 through an NC contact of K1. K1 always ends up on and K2 off, whichever goes first."""
+    src, button = d.add("el.source.dc", "G1", "24 V"), d.add("el.pushbutton.no.iec", "S1")
+    k2, k1 = d.add("el.coil.iec", "K2"), d.add("el.coil.iec", "K1")
+    nc = d.add("el.contact.nc.iec", "K1")
+    d.wire((src, "+"), (button, "1"))
+    d.wire((button, "2"), (k1, "A1"))
+    d.wire((k1, "A2"), (src, "-"))
+    d.wire((button, "2"), (nc, "1"))
+    d.wire((nc, "2"), (k2, "A1"))
+    d.wire((k2, "A2"), (src, "-"))
+    return src, button, k1, k2
+
+
+def test_an_order_that_changes_nothing_in_the_end_is_not_a_race():
+    d = Drawing()
+    _src, button, k1, k2 = _one_way(d)
+    sim = d.sim()
+    sim.command(part(sim, button).part.key, "press")
+    sim.run(0.1)
+    assert part(sim, k1).energised and not part(sim, k2).energised
+    assert races(sim) == []
+
+
+def test_a_blip_that_latches_something_is_a_race():
+    """K2 only gets a moment if it goes first, but that moment is enough to latch K3. So the order decides whether K3 is on."""
+    d = Drawing()
+    src, button, k1, k2 = _one_way(d)
+    k3, seal, set_k3 = d.add("el.coil.iec", "K3"), d.add("el.contact.no.iec", "K3"), d.add("el.contact.no.iec", "K2")
+    d.wire((src, "+"), (seal, "1"))
+    d.wire((seal, "2"), (k3, "A1"))
+    d.wire((src, "+"), (set_k3, "1"))
+    d.wire((set_k3, "2"), (k3, "A1"))
+    d.wire((k3, "A2"), (src, "-"))
+    sim = d.sim()
+    sim.command(part(sim, button).part.key, "press")
+    sim.run(0.2)
+    assert len(races(sim)) == 1 and "K2" in races(sim)[0] and "K1" in races(sim)[0]
+
+
+def test_many_relays_changing_together_dont_cost_a_solve_each_per_relay():
+    """A main relay bringing in thirty others mustn't stall the window while they're compared."""
+    d = Drawing()
+    src, button = d.add("el.source.dc", "G1", "24 V"), d.add("el.pushbutton.no.iec", "S1")
+    d.wire((src, "+"), (button, "1"))
+    for i in range(30):
+        coil = d.add("el.coil.iec", f"K{i}")
+        d.wire((button, "2"), (coil, "A1"))
+        d.wire((coil, "A2"), (src, "-"))
+    sim = d.sim()
+    sim.step()
+    before = sim.net._solves
+    sim.command(part(sim, button).part.key, "press")
+    sim.step()
+    assert sim.net._solves - before < 120      # about one a relay to change it, one a relay to look, and no more
+    assert races(sim) == []
+
+
+def test_a_race_between_timers_timing_out_together():
+    """Two timers with the same delay, each cutting the other off, are the same race a moment later."""
+    d = Drawing()
+    src = d.add("el.source.dc", "G1", "24 V")
+    t1, t2 = d.add("el.coil.ondelay", "KT1", "0.2 s"), d.add("el.coil.ondelay", "KT2", "0.2 s")
+    k1, k2 = d.add("el.coil.iec", "K1"), d.add("el.coil.iec", "K2")
+    for t in (t1, t2):
+        d.wire((src, "+"), (t, "A1"))
+        d.wire((t, "A2"), (src, "-"))
+    no1, no2 = d.add("el.contact.no.iec", "KT1"), d.add("el.contact.no.iec", "KT2")
+    nc1, nc2 = d.add("el.contact.nc.iec", "K2"), d.add("el.contact.nc.iec", "K1")
+    d.wire((src, "+"), (no1, "1"))
+    d.wire((no1, "2"), (nc1, "1"))
+    d.wire((nc1, "2"), (k1, "A1"))
+    d.wire((k1, "A2"), (src, "-"))
+    d.wire((src, "+"), (no2, "1"))
+    d.wire((no2, "2"), (nc2, "1"))
+    d.wire((nc2, "2"), (k2, "A1"))
+    d.wire((k2, "A2"), (src, "-"))
+    sim = d.sim()
+    sim.run(0.15)
+    assert races(sim) == []
+    sim.run(0.2)
+    assert len(races(sim)) == 1 and sim.net.races[0][0] > 0.15

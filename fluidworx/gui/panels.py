@@ -588,6 +588,9 @@ def _floor(x):
     return math.floor(x + 1e-9)
 
 
+WARNING_EVENTS = ("Race:",)
+
+
 class EventsPanel(ttk.Frame):
     def __init__(self, master, app):
         super().__init__(master, style="Surface.TFrame")
@@ -607,8 +610,9 @@ class EventsPanel(ttk.Frame):
         ev = sim.events
         if len(ev) < self.count:
             self.clear()
+        self.tree.tag_configure("warning", foreground=self.app.theme.ui["warning"])
         for t, tag, text in ev[self.count:]:
-            self.tree.insert("", "end", values=(f"{t:.2f}", tag, text))
+            self.tree.insert("", "end", values=(f"{t:.2f}", tag, text), tags=("warning",) if text.startswith(WARNING_EVENTS) else ())
         if len(ev) > self.count:
             kids = self.tree.get_children()
             if kids:

@@ -25,3 +25,5 @@ First version.
   powered from its own wires, with live inputs, outputs and variables.
 - Wires coloured by voltage, current along the real paths, contacts drawn as they are now, a Links tab, on/off signals on the trace,
   and supply and protection tables in the report. Study files are format 2 only if they hold links.
+- Says when relays race: when another order would leave them differently, the first drawn won only because it was drawn first, and a
+  real machine could go either way.

@@ -78,6 +78,7 @@ class App:
         self._last_tick = time.monotonic()
         self._frame = 0
         self._rt_factor = 1.0
+        self._races_said = 0
         self._results: queue.Queue = queue.Queue()
         self._load_icon()
         root.title(APP_NAME)
@@ -506,6 +507,7 @@ class App:
         self.currentpaths = FlowPaths(c, electric=True) if c.electrical_parts else None
         self.selected = None
         self.dirty = False
+        self._races_said = 0
         if st.units != self.units.system and st_path:
             self.set_units(st.units, mark_dirty=False)
         self._hide_welcome()
@@ -815,6 +817,7 @@ class App:
         self.circuit_panel.update_states()
         self.inspector.refresh()
         self.events_panel.update_events()
+        self._say_races()
         if self.running:
             self.rt_label.configure(text=f"{self._rt_factor:.2f}× real time")
         else:
@@ -823,6 +826,17 @@ class App:
             self.trace_panel.draw()
         if force:
             self.canvas.update_state(0.0)
+
+    def _say_races(self):
+        """A race changes how far a result can be trusted, so it doesn't wait to be found in a list."""
+        races = self.sim.net.races
+        if len(races) < self._races_said:
+            self._races_said = 0
+        if len(races) > self._races_said:
+            _t, first, other = races[-1]
+            self.toast(f"{first} and {other} raced: see Events. A real machine could go either way.", "warning")
+            self._races_said = len(races)
+        self._update_check_label()
 
     # ================================================================ small helpers
     def set_status(self, text):
@@ -846,11 +860,16 @@ class App:
         warns = sum(1 for i in c.issues if i.level in ("warning", "error"))
         notes = sum(1 for i in c.issues if i.level == "info")
         bits = []
+        races = len(self.sim.net.races) if self.sim is not None else 0
+        if races:
+            bits.append(f"{races} race{'s' * (races != 1)}")
         if warns:
             bits.append(f"{warns} warning{'s' * (warns != 1)}")
         if notes:
             bits.append(f"{notes} note{'s' * (notes != 1)}")
-        self.check_label.configure(text="Checks: " + (", ".join(bits) if bits else "OK"))
+        text = "Checks: " + (", ".join(bits) if bits else "OK")
+        if self.check_label.cget("text") != text:
+            self.check_label.configure(text=text)
 
     def _set_show(self, key, value):
         self.settings[key] = bool(value)
