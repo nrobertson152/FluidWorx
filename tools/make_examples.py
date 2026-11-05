@@ -270,7 +270,7 @@ def pneumatic_sequence():
     start = b.part("fl.pneu.dcv", 220, 380, "S1", "Start", params={**roller, "left": ["pushbutton"]})
     comp = b.part("fl.pneu.compressor", 120, 650, "P1", "6 bar", rot=90)
     supply = comp.terminals()["2"][1]
-    bus = b.line((comp.terminals()["2"][0], supply), (1100, supply))
+    b.line((comp.terminals()["2"][0], supply), (a0.terminals()["1"][0], supply))
     for v in (va, vb, a1, b0, b1, a0):
         pin = v.terminals()["1"]
         b.tee(v, "1", (pin[0], supply))
@@ -290,7 +290,6 @@ def pneumatic_sequence():
     b.wire(b1, "2", va, "12", via=[(p[0], 360), (va.terminals()["12"][0] + 20, 360), (va.terminals()["12"][0] + 20, va.terminals()["12"][1])])
     p = a0.terminals()["2"]
     b.wire(a0, "2", vb, "12", via=[(p[0], 400), (vb.terminals()["12"][0] + 20, 400), (vb.terminals()["12"][0] + 20, vb.terminals()["12"][1])])
-    assert bus
     b.save("pneumatic_sequence.schematix")
 
 
