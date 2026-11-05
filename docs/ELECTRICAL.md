@@ -35,6 +35,7 @@ A few things a tag can't say are ordinary component properties, which you can se
 | `Senses` | Analog sensor or potentiometer | `A1` or `PT1`: its whole range follows that actuator or pressure |
 | `Solenoid a`, `Solenoid b` | Valve | The tag of the coil, if it isn't the valve's own |
 | `Driven by` | Pump | The tag of the motor, if it isn't the pump's own |
+| `Senses` | Valve with a roller, plunger or cam | The same places as a position switch. `Senses a` and `Senses b` if it has one on each side |
 
 The **Links** tab lists everything that was found. The **Checks** tab lists what looks as though it should have been tied to
 something and wasn't. To try a link without changing the drawing, set it in the Properties panel: it's kept in the study

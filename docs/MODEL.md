@@ -38,8 +38,10 @@ relief valves, end stops, friction) are re-solved until their state agrees with 
 - **Air is treated as a compressible liquid.** Sequence and logic are right; speeds are rough, and there's no choked
   flow or temperature. Pneumatic flows are actual volume, not free air.
 - **Directional valves switch at once**, with no overlap. Transitions and spool shapes aren't modelled.
-- **A solenoid valve with no coil on an electrical sheet** works by clicking it. Mechanically operated valves (cams and
-  rollers) aren't linked to cylinders; position switches are, through their `Senses` property.
+- **A solenoid valve with no coil on an electrical sheet** works by clicking it.
+- **Rollers and cams** are tied to a cylinder by the valve's `Senses` property, or by its tag: a roller valve `a1` is at the
+  end of cylinder `A`'s stroke and `a0` at the start. A roller stays on a cam at one place for 1% of the stroke. It has no
+  idle return: a roller that trips only one way is on while the cylinder is there, in both directions.
 - **Cushions are drawn but not modelled.** Telescopic cylinders are one equivalent bore.
 - **Below about -0.9 bar**, the model supplies fluid to stop the pressure falling further, and logs "cavitation".
 - Parts modelled more simply than this are listed in the Checks panel. Symbols with no model (intensifiers, servo

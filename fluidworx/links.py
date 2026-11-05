@@ -70,7 +70,7 @@ def parse_senses(text: str):
 
 @dataclass
 class Link:
-    kind: str               # solenoid | contact | pressure | sense | motor | overload
+    kind: str               # solenoid | contact | pressure | sense | motor | overload | roller
     source: tuple           # the part that drives
     target: tuple           # the part that is driven
     text: str               # for the Links panel
@@ -116,6 +116,7 @@ def resolve(parts: list, issues: list, issue_type) -> list:
         _solenoids(parts, coils, used_coils, out, issues, issue_type)
     _contacts(parts, by_kind, coils, used_coils, out, issues, issue_type)
     _motors(by_kind, parts, out, issues, issue_type)
+    _rollers(by_kind, out, issues, issue_type)
     for tag, group in coils.items():
         for coil in group:
             if coil.key not in used_coils and coil.kind != "relay":
@@ -245,6 +246,43 @@ def _motors(by_kind, parts, out, issues, issue_type):
                 out.append(Link("motor", motor.key, pump.key, f"Motor {motor.tag} drives {pump.tag}"))
             elif named:
                 issues.append(issue_type("warning", f"{pump.tag} is driven by {named}, but no electric motor has that tag.", pump.key))
+
+
+_POSITION_VALVE = re.compile(r"^([A-Za-z])([01])$")
+
+
+def _rollers(by_kind, out, issues, issue_type):
+    """Valves the machine operates: a roller, plunger or cam, with a Senses property saying where. Pneumatic drawings often say
+    it in the tag: a roller valve a1 is at the end of cylinder A's stroke, and a0 at the start."""
+    actuators = {_tag(p): p for k in FLUID_ACTUATORS for p in by_kind.get(k, []) if _tag(p)}
+    for p in by_kind.get("dcv", []):
+        sides = simlinks.mechanical_sides(p.comp)
+        for side in sides:
+            where = "left" if side == "a" else "right"
+            prop = simlinks.SENSES if len(sides) == 1 else (simlinks.SENSES_A if side == "a" else simlinks.SENSES_B)
+            text = _prop(p.comp, prop)
+            if not text and len(sides) == 1:
+                m = _POSITION_VALVE.match(p.comp.designator or "")
+                if m and _fold(m.group(1)) in actuators:
+                    text = f"{m.group(1).upper()} {'100%' if m.group(2) == '1' else '0%'}"
+            if not text:
+                issues.append(issue_type("info", f"{p.tag}: nothing operates its {where}-hand roller. Set {prop} (A1 100%), or click it to "
+                                                 "operate it by hand.", p.key))
+                continue
+            sense = parse_senses(text)
+            if sense is None:
+                issues.append(issue_type("warning", f"{p.tag}: can't read “{text}”. Try A1 100% or A1 > 150 mm.", p.key))
+                continue
+            target = actuators.get(_fold(sense.target))
+            if target is None:
+                issues.append(issue_type("warning", f"{p.tag} senses {sense.target}, but no cylinder has that tag.", p.key))
+            elif sense.mode == "value":
+                issues.append(issue_type("warning", f"{p.tag} is operated at a place, so it needs to know where: try {sense.target} 100% or "
+                                                    f"{sense.target} > 50%.", p.key))
+            elif target.kind == "motor" or sense.quantity not in ("", "length"):
+                issues.append(issue_type("warning", f"{p.tag}: a roller or a cam follows where a cylinder is: try {sense.target} 100%.", p.key))
+            else:
+                out.append(Link("roller", target.key, p.key, f"The {where}-hand roller of {p.tag} senses {text}", side=where, sense=sense))
 
 
 # ---------------------------------------------------------------- supply rails named by a label

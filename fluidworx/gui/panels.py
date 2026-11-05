@@ -645,7 +645,7 @@ class EventsPanel(ttk.Frame):
 class LinksPanel(ttk.Frame):
     """What ties the electrical side to the fluid side, and the relays to their contacts: found from the tags."""
     KINDS = {"solenoid": "Solenoid", "contact": "Relay contact", "pressure": "Pressure switch", "sense": "Sensor",
-             "motor": "Motor", "overload": "Overload"}
+             "motor": "Motor", "overload": "Overload", "roller": "Roller"}
 
     def __init__(self, master, app):
         super().__init__(master, style="Surface.TFrame")
