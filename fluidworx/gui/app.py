@@ -12,7 +12,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
 from .. import APP_NAME, DONATE_URL, SCHEMATIC_EXTENSIONS, STUDY_EXTENSION, VERSION, catalog, circuit as circuit_mod
-from .. import engine, report
+from .. import engine, report, scenario
 from .. import study as study_mod
 from ..flowpaths import FlowPaths
 from ..integrations import caldera as cal
@@ -24,7 +24,7 @@ from ..vendor.openschematix.gui import theme as th
 from ..vendor.openschematix.gui.widgets import IconButton, ToastHost, ToolbarSeparator, Tooltip, set_current_theme
 from . import icons_extra  # noqa: F401  (registers FluidWorx's icons)
 from .dialogs import AboutDialog, CalderaImportDialog, PreferencesDialog, RevisionDialog, ShortcutsDialog
-from .panels import ChecksPanel, CircuitPanel, EventsPanel, FaultsPanel, Inspector, LinksPanel, ProgramPanel, TracePanel
+from .panels import ChecksPanel, CircuitPanel, EventsPanel, FaultsPanel, Inspector, LinksPanel, ProgramPanel, TestsPanel, TracePanel
 from .simcanvas import SimCanvas
 
 FILETYPES_ALL = [("FluidWorx and OpenSchematix files", "*.fluidworx *.schematix *.osch"),
@@ -79,6 +79,10 @@ class App:
         self._frame = 0
         self._rt_factor = 1.0
         self._races_said = 0
+        self.recorder = None        # writing down what's done to the simulation
+        self.test_runner = None     # a scenario running on the drawing, to be watched
+        self._test_queue = []       # scenarios waiting to run, off the drawing
+        self._test_job = None       # (index, runner) of the one running now
         self._results: queue.Queue = queue.Queue()
         self._load_icon()
         root.title(APP_NAME)
@@ -149,6 +153,7 @@ class App:
         self.links_panel = LinksPanel(self.dock, self)
         self.faults_panel = FaultsPanel(self.dock, self)
         self.program_panel = ProgramPanel(self.dock, self)
+        self.tests_panel = TestsPanel(self.dock, self)
         self.dock.add(self.trace_panel, text="Trace")
         self.dock.add(self.events_panel, text="Events")
         self.dock.add(self.checks_panel, text="Checks")
@@ -156,6 +161,7 @@ class App:
         self.dock.add(self.faults_panel, text="Faults")
         self.dock.add(self.program_panel, text="Program")
         self.dock.hide(self.program_panel)      # there's no PLC yet
+        self.dock.add(self.tests_panel, text="Tests")
         self.vpane.add(self.dock, weight=2)
         self.right = ttk.Notebook(self.hpane)
         self.inspector = Inspector(self.right, self)
@@ -513,6 +519,10 @@ class App:
         self.running = False
         self.canvas.doc = None      # nothing may draw the old circuit with the new simulator's arrays
         self.study, self.study_path = st, st_path
+        self.recorder = None
+        self.test_runner = None
+        self._test_queue = []
+        self._test_job = None
         self.circuit = c
         self.sim = engine.Simulator(c)
         for ref, _what, _fault in failed:   # the same question still stands, for whatever is still in the drawing
@@ -537,6 +547,9 @@ class App:
         self.links_panel.rebuild()
         self.faults_panel.rebuild()
         self.program_panel.rebuild()
+        if not keep_view:
+            self.tests_panel.results = {}
+        self.tests_panel.rebuild()
         if c.electrical_parts and self.sim.net.plcs:
             self.dock.add(self.program_panel)
         else:
@@ -712,6 +725,7 @@ class App:
         if self.sim is None:
             return
         self.running = False
+        self.test_runner = None
         self._update_play()
         self.sim.reset()
         self.events_panel.clear()
@@ -727,6 +741,9 @@ class App:
         if self.sim is None:
             return
         if self.sim.command(key, name):
+            if self.recorder is not None:
+                self.recorder.command(key, name, self.sim.parts[tuple(key)].part.tag)
+                self.tests_panel.show_steps()
             if not self.running:
                 # solve once so a click while paused still shows its effect
                 self.sim.step()
@@ -777,12 +794,135 @@ class App:
     # ---- failing things on purpose
     def set_fault(self, key, name):
         if self.sim is not None and self.sim.set_fault(key, name):
+            if self.recorder is not None:
+                self.recorder.fault(key, name, self.sim.parts[tuple(key)].part.tag)
+                self.tests_panel.show_steps()
             self._faults_changed()
 
     def set_line_fault(self, ref, failed):
         if self.sim is not None and self.sim.set_line_fault(ref, failed):
+            if self.recorder is not None:
+                self.recorder.line(ref, failed, self.sim.line_name(ref))
+                self.tests_panel.show_steps()
             self._lines_changed()
             self._faults_changed()
+
+    # ---- test scenarios
+    def toggle_recording(self):
+        if self.sim is None:
+            return
+        if self.recorder is None:
+            self.running = False
+            self.sim.clear_faults()
+            self._lines_changed()
+            self.faults_panel.rebuild()
+            self._update_fault_label()
+            self.reset()
+            self.recorder = scenario.Recorder(self.sim)
+            self.dock.select(self.tests_panel)
+            self.toast("Recording. Press Space to run, and operate the machine. Everything starts from a reset.")
+        else:
+            steps, self.recorder = self.recorder.steps, None
+            self.running = False
+            self._update_play()
+            if steps:
+                tests = self.study.scenarios
+                tests.append({"name": f"Scenario {len(tests) + 1}", "steps": steps})
+                self.tests_panel.rebuild(select=len(tests) - 1)
+                self._mark_dirty()
+                return
+        self.tests_panel.rebuild()
+
+    def tests_changed(self, select_step=None):
+        self._mark_dirty()
+        self.tests_panel.rebuild()
+        if select_step is not None and self.tests_panel.steps.exists(str(select_step)):
+            self.tests_panel.steps.selection_set(str(select_step))
+
+    def _fresh_simulator(self):
+        """A machine of its own for a test, so that running one leaves what's on the drawing alone."""
+        st = self.study
+        project, warnings = circuit_mod.load_project_bytes(st.source_bytes, st.source_ext)
+        c = circuit_mod.build(project, warnings, st.links)
+        circuit_mod.apply_study_params(c, st.params)
+        return engine.Simulator(c)
+
+    def run_tests(self, indexes):
+        """Off the drawing, a slice at a time, so that the window stays alive."""
+        if self.recorder is not None or self.test_runner is not None or self._test_job is not None:
+            return
+        self._test_queue = list(indexes)
+        self._next_test()
+
+    def _next_test(self):
+        if not self._test_queue:
+            self._test_job = None
+            self._tests_finished()
+            return
+        i = self._test_queue.pop(0)
+        try:
+            self._test_job = (i, scenario.Runner(self._fresh_simulator(), self.study.scenarios[i], self.units))
+        except (circuit_mod.CircuitError, IndexError) as e:
+            self._test_job = None
+            self._test_queue = []
+            messagebox.showerror(APP_NAME, f"The test couldn't be run.\n\n{e}", parent=self.root)
+            return
+        self.tests_panel.update_buttons()
+        self.root.after(1, self._run_slice)
+
+    def _run_slice(self):
+        job = self._test_job
+        if job is None:
+            return
+        i, runner = job
+        start = time.monotonic()
+        while time.monotonic() - start < STEP_BUDGET_S:
+            if not runner.advance():
+                self.tests_panel.results[i] = runner.result
+                self.tests_panel.rebuild()
+                self._next_test()
+                return
+        self.set_status(f"Running {runner.scenario['name']}: {runner.sim.time:.1f} s…")
+        self.root.after(1, self._run_slice)
+
+    def _tests_finished(self):
+        results = list(self.tests_panel.results.values())
+        failed = sum(1 for r in results if not r.passed)
+        self.set_status(f"Tests: {len(results) - failed} of {len(results)} passed.")
+        self.toast(f"{failed} test{'s' * (failed != 1)} failed" if failed else "Tests passed", "warning" if failed else "success")
+        self.tests_panel.update_buttons()
+
+    def watch_test(self, index):
+        """On the drawing, at the speed set, to see it happen. It's the same machine and the same answer."""
+        if self.recorder is not None or self.test_runner is not None or self._test_job is not None:
+            return
+        self.test_runner = (index, scenario.Runner(self.sim, self.study.scenarios[index], self.units))
+        self._lines_changed()
+        self.faults_panel.rebuild()
+        self._update_fault_label()
+        self.events_panel.clear()
+        self.running = True
+        self._last_tick = time.monotonic()
+        self._update_play()
+        self.tests_panel.update_buttons()
+
+    def _watch_step(self) -> bool:
+        """One step of a scenario being watched. False once it's over."""
+        index, runner = self.test_runner
+        going = runner.advance()
+        if runner.lines_changed:
+            runner.lines_changed = False
+            self._lines_changed()
+            self._faults_changed()
+        if not going:
+            self.tests_panel.results[index] = runner.result
+            self.test_runner = None
+            self.running = False
+            self._update_play()
+            self.tests_panel.rebuild()
+            self._faults_changed()
+            self.toast("Passed" if runner.result.passed else f"Failed: {len(runner.result.failures)} step(s)", "success" if runner.result.passed else "warning")
+        return going
 
     def put_right(self, ref):
         if self.sim is None:
@@ -873,8 +1013,12 @@ class App:
         start = time.monotonic()
         done = 0
         for _ in range(steps):
-            self.sim.step()
-            self.sim.trace.maybe_record()
+            if self.test_runner is not None:
+                if not self._watch_step():
+                    break
+            else:
+                self.sim.step()
+                self.sim.trace.maybe_record()
             done += 1
             if time.monotonic() - start > STEP_BUDGET_S:
                 break
@@ -991,6 +1135,7 @@ class App:
         self._rebuild_tabs()
         self.checks_panel.rebuild()
         self.links_panel.rebuild()
+        self.tests_panel.rebuild()
         self.circuit_panel.rebuild()
         self.trace_panel.rebuild()
         self.inspector.show(self.selected)
@@ -1127,7 +1272,8 @@ class App:
         p = self._ask_save("Export report", ".html", "Web page", " simulation")
         if not p:
             return
-        self._write_text(p, report.html_report(self.study, self.circuit, self.sim, self.units, self.doc))
+        tests = [self.tests_panel.results[i] for i in sorted(self.tests_panel.results)]
+        self._write_text(p, report.html_report(self.study, self.circuit, self.sim, self.units, self.doc, tests=tests))
 
     def export_trace(self):
         if self.sim is None:

@@ -201,7 +201,7 @@ border-bottom:1px solid #e5e7eb;vertical-align:top;font-variant-numeric:tabular-
 .note{border-left:3px solid #c27803;padding:6px 12px;background:#fff8eb;margin:14px 0}"""
 
 
-def html_report(study, circuit, sim, units: Units, doc, title: str = "") -> str:
+def html_report(study, circuit, sim, units: Units, doc, title: str = "", tests=()) -> str:
     e = html.escape
     rev = study.source_rev or {}
     rows = [("Schematic", study.source_name), ("Content SHA-256", study.source_sha256)]
@@ -270,6 +270,13 @@ def html_report(study, circuit, sim, units: Units, doc, title: str = "") -> str:
             sections.append("<h2>Protection</h2><table><tr><th>Part</th><th>Rating</th><th>Peak current so far</th><th>Of rating</th>"
                             "<th>State</th></tr>"
                             + "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in row) + "</tr>" for row in protection) + "</table>")
+    if tests:
+        rows = []
+        for result in tests:
+            what = "Passed" if result.passed else "; ".join(f"{r.text}: {r.detail}" for r in result.failures) or "Didn't finish"
+            rows.append(f"<tr><td>{e(result.name)}</td><td>{'pass' if result.passed else 'FAIL'}</td><td>{result.time:.2f} s</td><td>{e(what)}</td></tr>")
+        sections.append('<h2>Test scenarios</h2><p class="note">These show what this simplified model does. They aren\'t tests of a real machine.</p>'
+                        "<table><tr><th>Scenario</th><th>Result</th><th>Took</th><th>Details</th></tr>" + "".join(rows) + "</table>")
     if sim.net.races:
         sections.append('<h2>Races</h2><p class="note">These relays were ready to change at the same moment, and the result above is '
                         "only one of the answers: the simulation changes them in drawing order, and a real machine has no drawing order.</p>"

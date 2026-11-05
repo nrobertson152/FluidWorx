@@ -4,7 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from .. import catalog, electric, engine, units as units_mod
+from .. import catalog, electric, engine, scenario, units as units_mod
 from ..vendor.openschematix import plc as plc_core, simlinks
 from ..vendor.openschematix.gui import theme as th
 from ..vendor.openschematix.gui.plc_view import ProgramView
@@ -767,6 +767,290 @@ class ProgramPanel(ttk.Frame):
                 self._rows[name] = self.watch.insert("", "end", values=(label, shown))
             elif self.watch.set(iid, "value") != shown:
                 self.watch.set(iid, "value", shown)
+
+
+class TestsPanel(ttk.Frame):
+    """Saved test scenarios: record what you do, say what should happen, and run it again after a change."""
+    PASS, FAIL = "✓", "✗"
+
+    def __init__(self, master, app):
+        super().__init__(master, style="Surface.TFrame")
+        self.app = app
+        self.results = {}       # scenario index -> its last result
+        left = ttk.Frame(self, style="Surface.TFrame", padding=(8, 6))
+        left.pack(side="left", fill="y")
+        row = ttk.Frame(left, style="Surface.TFrame")
+        row.pack(fill="x")
+        self.record_btn = ttk.Button(row, text="Record", command=self.app.toggle_recording)
+        self.record_btn.pack(side="left")
+        self.run_all_btn = ttk.Button(row, text="Run all", command=self.run_all)
+        self.run_all_btn.pack(side="left", padx=(4, 0))
+        self.list = ttk.Treeview(left, columns=("result",), show="tree", selectmode="browse", height=6)
+        self.list.column("#0", width=170, stretch=True)
+        self.list.column("result", width=30, stretch=False, anchor="center")
+        self.list.configure(show=("tree",))
+        self.list.pack(fill="both", expand=True, pady=(6, 6))
+        self.list.bind("<<TreeviewSelect>>", lambda e: self.show_steps())
+        row = ttk.Frame(left, style="Surface.TFrame")
+        row.pack(fill="x")
+        self.run_btn = ttk.Button(row, text="Run", style="Accent.TButton", command=self.run_selected)
+        self.run_btn.pack(side="left")
+        self.watch_btn = ttk.Button(row, text="Watch", command=self.watch_selected)
+        self.watch_btn.pack(side="left", padx=(4, 0))
+        Tooltip(self.watch_btn, "Run it on the drawing, at the speed set above, to see it happen")
+        row = ttk.Frame(left, style="Surface.TFrame")
+        row.pack(fill="x", pady=(4, 0))
+        self.rename_btn = ttk.Button(row, text="Rename", command=self.rename)
+        self.rename_btn.pack(side="left")
+        self.delete_btn = ttk.Button(row, text="Delete", command=self.delete)
+        self.delete_btn.pack(side="left", padx=(4, 0))
+        right = ttk.Frame(self, style="Surface.TFrame", padding=(0, 6, 8, 6))
+        right.pack(side="left", fill="both", expand=True)
+        bar = ttk.Frame(right, style="Surface.TFrame")
+        bar.pack(fill="x")
+        self.check_btn = ttk.Button(bar, text="Expect the selected part…", command=self.add_check)
+        self.check_btn.pack(side="left")
+        Tooltip(self.check_btn, "Add a check: select a part on the drawing first")
+        self.up_btn = ttk.Button(bar, text="▲", width=3, command=lambda: self.move(-1))
+        self.up_btn.pack(side="left", padx=(8, 0))
+        self.down_btn = ttk.Button(bar, text="▼", width=3, command=lambda: self.move(1))
+        self.down_btn.pack(side="left", padx=(2, 0))
+        self.del_step_btn = ttk.Button(bar, text="Remove step", command=self.remove_step)
+        self.del_step_btn.pack(side="left", padx=(8, 0))
+        self.summary = ttk.Label(bar, text="", style="Bold.TLabel")
+        self.summary.pack(side="left", padx=(12, 0))
+        self.note = ttk.Label(right, text="These show what this simplified model does. They aren't tests of a real machine.", style="Faint.TLabel")
+        self.note.pack(side="bottom", anchor="w", pady=(4, 0))
+        holder = ttk.Frame(right, style="Surface.TFrame")
+        holder.pack(fill="both", expand=True, pady=(6, 0))
+        self.steps = ttk.Treeview(holder, columns=("step", "result"), show="headings", selectmode="browse")
+        self.steps.heading("step", text="Step", anchor="w")
+        self.steps.heading("result", text="What happened", anchor="w")
+        self.steps.column("step", width=420, stretch=True)
+        self.steps.column("result", width=300, stretch=True)
+        self.steps.pack(side="left", fill="both", expand=True)
+        _scroll(holder, self.steps).pack(side="right", fill="y")
+        self.steps.bind("<Double-Button-1>", self.edit_step)
+
+    # ---- the lists
+    def scenarios(self) -> list:
+        return self.app.study.scenarios if self.app.study is not None else []
+
+    def rebuild(self, select=None):
+        """What's in the study."""
+        was = self.selected_index()
+        self.list.delete(*self.list.get_children())
+        self.list.tag_configure("pass", foreground=self.app.theme.ui["success"] if "success" in self.app.theme.ui else "#1a8f3c")
+        self.list.tag_configure("fail", foreground=self.app.theme.ui["danger"])
+        for i, s in enumerate(self.scenarios()):
+            result = self.results.get(i)
+            mark = "" if result is None else (self.PASS if result.passed else self.FAIL)
+            self.list.insert("", "end", iid=str(i), text=f"{mark} {s['name']}".strip(), tags=("" if result is None else "pass" if result.passed else "fail",))
+        target = select if select is not None else was
+        if target is not None and self.list.exists(str(target)):
+            self.list.selection_set(str(target))
+        self.show_steps()
+        self.update_buttons()
+
+    def selected_index(self):
+        sel = self.list.selection()
+        return int(sel[0]) if sel else None
+
+    def selected(self):
+        i = self.selected_index()
+        return self.scenarios()[i] if i is not None and i < len(self.scenarios()) else None
+
+    def show_steps(self):
+        self.steps.delete(*self.steps.get_children())
+        s = self.selected()
+        recorder = self.app.recorder
+        steps = recorder.steps if recorder is not None else (s["steps"] if s else [])
+        result = None if recorder is not None or s is None else self.results.get(self.selected_index())
+        rows = {r.index: r for r in result.rows} if result else {}
+        u = self.app.theme.ui
+        self.steps.tag_configure("fail", foreground=u["danger"])
+        for i, step in enumerate(steps):
+            r = rows.get(i)
+            said = "" if r is None else (f"{self.PASS} {r.detail}".strip() if r.ok else f"{self.FAIL} {r.detail}".strip())
+            self.steps.insert("", "end", iid=str(i), values=(scenario.describe(step, self.app.units), said), tags=("fail",) if r is not None and not r.ok else ())
+        if recorder is not None:
+            self.summary.configure(text="Recording: what you do is written down")
+        elif result is not None:
+            races = f", {len(result.races)} raced" if result.races else ""
+            self.summary.configure(text=("Passed" if result.passed else f"Failed: {len(result.failures)} step{'s' * (len(result.failures) != 1)}") + f" in {result.time:.2f} s{races}")
+        else:
+            self.summary.configure(text="")
+        if recorder is not None and steps:
+            self.steps.see(str(len(steps) - 1))
+        self.update_buttons()
+
+    def update_buttons(self):
+        recording = self.app.recorder is not None
+        busy = self.app.test_runner is not None
+        has = self.selected() is not None
+        idle = not recording and not busy
+        self.record_btn.configure(text="Stop recording" if recording else "Record", state="normal" if not busy and self.app.study is not None else "disabled")
+        for b in (self.run_btn, self.watch_btn, self.rename_btn, self.delete_btn, self.up_btn, self.down_btn, self.del_step_btn):
+            b.configure(state="normal" if has and idle else "disabled")
+        self.run_all_btn.configure(state="normal" if self.scenarios() and idle else "disabled")
+        self.check_btn.configure(state="normal" if recording or (has and idle) else "disabled")
+
+    # ---- what the buttons do
+    def run_selected(self):
+        i = self.selected_index()
+        if i is not None:
+            self.app.run_tests([i])
+
+    def run_all(self):
+        self.app.run_tests(list(range(len(self.scenarios()))))
+
+    def watch_selected(self):
+        i = self.selected_index()
+        if i is not None:
+            self.app.watch_test(i)
+
+    def rename(self):
+        s = self.selected()
+        if s is None:
+            return
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Rename", "Name:", initialvalue=s["name"], parent=self)
+        if name and name.strip():
+            s["name"] = name.strip()[:scenario.MAX_TEXT]
+            self.app.tests_changed()
+
+    def delete(self):
+        i = self.selected_index()
+        if i is None:
+            return
+        from tkinter import messagebox
+        if messagebox.askokcancel("Delete", f"Delete the scenario {self.scenarios()[i]['name']}?", parent=self):
+            del self.scenarios()[i]
+            self.results = {(k if k < i else k - 1): v for k, v in self.results.items() if k != i}
+            self.list.selection_set(())
+            self.app.tests_changed()
+
+    def _edited_steps(self):
+        recorder = self.app.recorder
+        if recorder is not None:
+            return recorder.steps
+        s = self.selected()
+        return s["steps"] if s else None
+
+    def _selected_step(self):
+        sel = self.steps.selection()
+        return int(sel[0]) if sel else None
+
+    def _steps_changed(self, select=None):
+        i = self.selected_index()
+        if i is not None:
+            self.results.pop(i, None)
+        if self.app.recorder is None:
+            self.app.tests_changed(select_step=select)
+        else:
+            self.show_steps()
+
+    def move(self, d):
+        steps, i = self._edited_steps(), self._selected_step()
+        if steps is None or i is None or not 0 <= i + d < len(steps):
+            return
+        steps[i], steps[i + d] = steps[i + d], steps[i]
+        self._steps_changed(i + d)
+
+    def remove_step(self):
+        steps, i = self._edited_steps(), self._selected_step()
+        if steps is not None and i is not None and i < len(steps):
+            del steps[i]
+            self._steps_changed()
+
+    def edit_step(self, _e=None):
+        """A wait's length, or how long to wait for something."""
+        steps, i = self._edited_steps(), self._selected_step()
+        if steps is None or i is None or i >= len(steps):
+            return
+        step = steps[i]
+        key = {"wait": "seconds", "wait_for": "timeout"}.get(step["do"])
+        if key is None:
+            return
+        from tkinter import simpledialog
+        value = simpledialog.askfloat("Time", "Seconds:", initialvalue=step[key], minvalue=0.0, maxvalue=scenario.MAX_SECONDS, parent=self)
+        if value is not None:
+            step[key] = value
+            self._steps_changed(i)
+
+    def add_check(self):
+        key = self.app.selected
+        if key is None or self.app.sim is None:
+            self.app.toast("Select a part on the drawing first", "warning")
+            return
+        ExpectDialog(self, key)
+
+    def add_step(self, step):
+        recorder = self.app.recorder
+        if recorder is not None:
+            recorder.expect(step)
+        else:
+            s = self.selected()
+            if s is None:
+                return
+            where = self._selected_step()
+            s["steps"].insert(len(s["steps"]) if where is None else where + 1, step)
+        self._steps_changed()
+
+
+class ExpectDialog(tk.Toplevel):
+    """What should be so of this part: as it is now, or as near as makes no matter."""
+
+    def __init__(self, panel, key):
+        super().__init__(panel)
+        self.panel, self.key = panel, key
+        self.app = panel.app
+        sim = self.app.sim
+        b = sim.parts[tuple(key)]
+        self.title(f"Expect {b.part.tag}")
+        self.transient(panel.winfo_toplevel())
+        self.configure(bg=self.app.theme.ui["bg"])
+        box = ttk.Frame(self, style="Surface.TFrame", padding=12)
+        box.pack(fill="both", expand=True)
+        ttk.Label(box, text=f"{b.part.tag}, as it is now", style="Bold.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+        status = sim.status(key)
+        self.options = [(f"State is “{status}”", None)] if status else []
+        for label, quantity, value in b.readings(sim.p):
+            value = abs(value) if isinstance(value, complex) else value
+            self.options.append((f"{label} is {self.app.units.fmt(quantity, value)}", label))
+        self.choice = tk.StringVar(value=self.options[0][0] if self.options else "")
+        for i, (text, _label) in enumerate(self.options):
+            ttk.Radiobutton(box, text=text, value=text, variable=self.choice).grid(row=1 + i, column=0, columnspan=3, sticky="w", pady=1)
+        row = 2 + len(self.options)
+        ttk.Label(box, text="Within", style="Surface.TLabel").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        self.tolerance = tk.StringVar(value="5")
+        ttk.Entry(box, textvariable=self.tolerance, width=6, justify="right").grid(row=row, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(box, text="% (for a reading)", style="Muted.TLabel").grid(row=row, column=2, sticky="w", pady=(8, 0))
+        self.wait = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Wait for it, at most", variable=self.wait).grid(row=row + 1, column=0, sticky="w", pady=(4, 0))
+        self.timeout = tk.StringVar(value=f"{scenario.DEFAULT_TIMEOUT:g}")
+        ttk.Entry(box, textvariable=self.timeout, width=6, justify="right").grid(row=row + 1, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(box, text="s", style="Muted.TLabel").grid(row=row + 1, column=2, sticky="w", pady=(4, 0))
+        buttons = ttk.Frame(box, style="Surface.TFrame")
+        buttons.grid(row=row + 2, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Add", style="Accent.TButton", command=self.add).pack(side="right", padx=(0, 6))
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def add(self):
+        label = dict(self.options).get(self.choice.get())
+        try:
+            tolerance = max(0.0, float(self.tolerance.get())) / 100.0
+            timeout = max(0.0, float(self.timeout.get()))
+        except ValueError:
+            self.app.toast("Enter a number", "warning")
+            return
+        wait = self.wait.get()
+        sim = self.app.sim
+        step = scenario.reading_check(sim, self.key, label, tolerance, wait, timeout) if label else scenario.state_check(sim, self.key, wait, timeout)
+        if step is not None:
+            self.panel.add_step(step)
+        self.destroy()
 
 
 class FaultsPanel(ttk.Frame):

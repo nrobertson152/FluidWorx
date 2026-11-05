@@ -620,3 +620,142 @@ def test_the_properties_panel_opens_the_program(app):
     pump(app)
     app.show_program(key)
     assert app.dock.select() == str(app.program_panel)
+
+
+def press_and_release(app, sim_key):
+    app.command(sim_key, "press")
+    app.sim.run(0.1)
+    app.command(sim_key, "release")
+
+
+def record_a_cycle(app):
+    panel = app.tests_panel
+    app.toggle_recording()
+    assert app.recorder is not None and panel.record_btn.cget("text") == "Stop recording"
+    assert app.sim.time == 0.0
+    app.sim.run(0.2)
+    start = next(k for k, b in app.sim.parts.items() if b.part.tag == "S1")
+    press_and_release(app, start)
+    app.sim.run(4.0)
+    rod = next(k for k, b in app.sim.parts.items() if b.part.tag == "A1")
+    from fluidworx import scenario
+    panel.add_step(scenario.state_check(app.sim, rod, wait=True, timeout=10.0))
+    app.toggle_recording()
+    return rod
+
+
+def test_record_a_scenario_and_run_it(app):
+    open_ex(app, "relay_latch.schematix")
+    panel = app.tests_panel
+    assert not app.study.scenarios and str(panel.run_all_btn.cget("state")) == "disabled"
+    record_a_cycle(app)
+    assert app.recorder is None and app.dirty
+    assert [s["name"] for s in app.study.scenarios] == ["Scenario 1"]
+    assert panel.selected_index() == 0 and len(panel.steps.get_children()) >= 4
+    time_on_drawing = app.sim.time
+    app.run_tests([0])
+    deadline = time.time() + 20
+    while app._test_job is not None and time.time() < deadline:
+        pump(app, 2)
+    assert app._test_job is None
+    assert panel.results[0].passed, [(r.text, r.detail) for r in panel.results[0].failures]
+    assert app.sim.time == time_on_drawing, "what's on the drawing was left alone"
+    assert panel.summary.cget("text").startswith("Passed")
+    assert panel.list.item("0", "text").startswith(panel.PASS)
+
+
+def test_watch_a_scenario_on_the_drawing(app):
+    open_ex(app, "relay_latch.schematix")
+    record_a_cycle(app)
+    panel = app.tests_panel
+    app.watch_test(0)
+    assert app.test_runner is not None and app.running and str(panel.run_btn.cget("state")) == "disabled"
+    deadline = time.time() + 30
+    while app.test_runner is not None and time.time() < deadline:
+        app._advance(0.2)
+        pump(app, 1)
+    assert app.test_runner is None and not app.running
+    assert panel.results[0].passed
+    assert str(panel.run_btn.cget("state")) == "normal"
+
+
+def test_scenarios_are_saved_with_the_study(app, tmp_path):
+    from fluidworx import study as st
+    open_ex(app, "relay_latch.schematix")
+    record_a_cycle(app)
+    path = str(tmp_path / "m.fluidworx")
+    assert app._write(path)
+    assert [s["name"] for s in st.load(path).scenarios] == ["Scenario 1"]
+    open_ex(app, "lift_cylinder.schematix")
+    assert not app.tests_panel.list.get_children()
+    assert app.open_path(path, confirm=False)
+    pump(app)
+    assert len(app.tests_panel.list.get_children()) == 1
+
+
+def test_a_scenario_can_be_edited(app, monkeypatch):
+    open_ex(app, "relay_latch.schematix")
+    record_a_cycle(app)
+    panel = app.tests_panel
+    test = app.study.scenarios[0]
+    n = len(test["steps"])
+    panel.steps.selection_set("0")
+    panel.remove_step()
+    assert len(test["steps"]) == n - 1
+    panel.steps.selection_set("0")
+    first = test["steps"][0]
+    panel.move(1)
+    assert test["steps"][1] is first
+    from tkinter import simpledialog
+    wait = next(i for i, s in enumerate(test["steps"]) if s["do"] == "wait")
+    panel.steps.selection_set(str(wait))
+    monkeypatch.setattr(simpledialog, "askfloat", lambda *a, **k: 2.5)
+    panel.edit_step()
+    assert test["steps"][wait]["seconds"] == 2.5
+    monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: "Renamed")
+    panel.rename()
+    assert test["name"] == "Renamed" and "Renamed" in panel.list.item("0", "text")
+
+
+def test_expecting_a_selected_part(app):
+    from fluidworx.gui.panels import ExpectDialog
+    open_ex(app, "relay_latch.schematix")
+    record_a_cycle(app)
+    panel = app.tests_panel
+    test = app.study.scenarios[0]
+    n = len(test["steps"])
+    panel.add_check()     # nothing selected: it says so and does nothing
+    assert len(test["steps"]) == n
+    rod = next(k for k, b in app.sim.parts.items() if b.part.tag == "A1")
+    app.select(rod)
+    d = ExpectDialog(panel, rod)
+    d.add()
+    assert len(test["steps"]) == n + 1 and test["steps"][-1]["status"] == app.sim.status(rod)
+    d = ExpectDialog(panel, rod)
+    d.choice.set(d.options[1][0])
+    d.tolerance.set("10")
+    d.wait.set(True)
+    d.timeout.set("3")
+    d.add()
+    step = test["steps"][-1]
+    assert step["do"] == "wait_for" and step["timeout"] == 3.0 and "reading" in step
+    pump(app)
+
+
+def test_recording_writes_down_faults_and_lines(app):
+    open_ex(app, "relay_latch.schematix")
+    app.toggle_recording()
+    key = next(k for k, b in app.sim.parts.items() if b.part.tag == "S1")
+    app.set_fault(key, "stuck_open")
+    wire = next(iter(app.circuit.el_wire_nodes))
+    app.set_line_fault(wire, True)
+    app.toggle_recording()
+    kinds = [s["do"] for s in app.study.scenarios[0]["steps"]]
+    assert "fault" in kinds and "line" in kinds
+
+
+def test_stopping_a_recording_with_nothing_in_it_adds_nothing(app):
+    open_ex(app, "relay_latch.schematix")
+    app.toggle_recording()
+    app.toggle_recording()
+    assert app.study.scenarios == []

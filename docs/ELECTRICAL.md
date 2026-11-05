@@ -182,6 +182,24 @@ This shows what this simplified model does. **It isn't a failure analysis or an 
 safe. It tries the failures you think of, one choice per part, and the model's limits still apply: a stuck spool here has no partial
 travel, and a contact that welds here welds all its poles.
 
+## Test scenarios
+
+Once a machine does what it should, save that, so you can see whether it still does after a change. On the **Tests** tab, press **Record**: the simulation goes back to the start, and
+everything you do is written down with how long you took, as you press buttons, click switches and fail parts. To say what should happen, select a part and press **Expect the selected
+part**: its state as it is now, or a reading within a tolerance, either right then or by waiting for it for up to so long. Double-click a wait to change it. Press **Stop recording**.
+
+**Run** runs it to the end on a machine of its own, leaving what's on the drawing alone, and lists what happened against each step. **Run all** runs them all. **Watch** runs it on the
+drawing at the speed you've set. Each starts from a reset with nothing failed.
+
+Scenarios are saved in the study, which makes it format 3. They run without a window too, for scripts and CI:
+
+```sh
+fluidworx --test machine.fluidworx      # 0 if they all pass, 1 if any fail, 2 if there's nothing to run
+```
+
+A step that names a part no longer in the drawing fails, and says so. A scenario with a wait in it is only as good as its waits: if a change makes the machine slower, a button can be pressed
+before the rod has got there, so wait for the rod. A pass shows what this model does. **It isn't a test of a real machine.**
+
 ## Results for checking a design
 
 The report has a **Supplies** table (peak current so far, against the limit and against everything connected) and a **Protection** table (peak
