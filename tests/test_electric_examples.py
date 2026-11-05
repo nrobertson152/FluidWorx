@@ -26,6 +26,22 @@ def until(sim, test, limit):
     return sim.time - t0
 
 
+@pytest.mark.parametrize("name", ["plc_cylinder", "relay_latch", "motor_starter_pump", "electronics_threshold"])
+def test_openschematix_finds_nothing_wrong_with_them(name):
+    """They're drawings first: a relay's contacts share its tag, told apart by their terminal numbers, as OpenSchematix wants."""
+    from fluidworx.vendor.openschematix import check
+    c, _sim = run_example(f"{name}.schematix")
+    assert not [i.message for i in check.check(c.project) if i.severity == check.ERROR]
+
+
+def test_plc_cylinder_is_powered_from_the_mains_it_shows():
+    c, sim = run_example("plc_cylinder.schematix")
+    sim.run(0.2)
+    psu = tag(sim, "G1")
+    assert psu.status() == "On" and not psu.always_on
+    assert {r[2] for r in c.el_rails} == {"L"}, "L is live because of its label; N is 0 V; the 24 V side is fed by the supply"
+
+
 def test_plc_cylinder_goes_out_and_back_on_its_own():
     c, sim = run_example("plc_cylinder.schematix")
     assert not [i for i in c.issues if i.level != "info"], c.issues

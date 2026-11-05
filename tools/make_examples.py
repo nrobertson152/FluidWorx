@@ -30,9 +30,12 @@ class B:
         self.n += 1
         return self.n
 
-    def part(self, symbol, x, y, des="", label="", rot=0, mirror=False, params=None, props=None):
+    def part(self, symbol, x, y, des="", label="", rot=0, mirror=False, params=None, props=None, numbered=None):
+        """`numbered` are terminal designations, as "13", "14": what tells a relay's contacts apart on a drawing."""
         c = Component(id=self._id(), symbol=symbol, x=x, y=y, rotation=rot, mirror=mirror, designator=des, label=label,
                       params=params or {}, props=props or {})
+        if numbered:
+            c.terminal_labels = dict(zip([t.name for t in c.terminal_defs()], numbered))
         self.doc.components[c.id] = c
         return c
 
@@ -307,39 +310,43 @@ def plc_cylinder():
     b.tee(pt_h, "P", (ax, 340), via=[(620, 340)])
     b.sheet("Control")
     psu = b.part("el.psu", 170, 365, "G1", "24 V 5 A")
+    b.wire(b.part("el.rail.pos", 100, 335, label="L"), "1", psu, "L")
+    b.wire(b.part("el.rail.neg", 100, 395, label="N"), "1", psu, "N")
     b.line(psu.terminals()["+"], (230, 355), (230, 90), (610, 90))
     b.line(psu.terminals()["-"], (230, 375), (230, 640), (920, 640))
     b.tee(b.part("el.rail.pos", 300, 50, label="+24V"), "1", (300, 90))
     b.tee(b.part("el.rail.neg", 300, 680, label="0V"), "1", (300, 640))
-    b.line((300, 90), (300, 400))       # what feeds the inputs
-    params = {"di": 8, "do": 6, "ai": 2, "ao": 1, "do_type": "source",
+    params = {"di": 3, "do": 3, "ai": 1, "ao": 0, "do_type": "source",
               "tags": {"I0": "Start", "I1": "AtHome", "I2": "AtEnd", "AI0": "Pressure", "Q0": "Extend", "Q1": "Retract", "Q2": "Moving"},
               "program": {"scan_ms": 10, "io": {"AI0": {"signal": "0-10V", "lo": 0, "hi": 250, "note": "PT1, bar"}},
                           "vars": [{"name": "Extending", "type": "BOOL", "init": "", "note": "the rod is on its way out"}],
                           "pous": [{"name": "Cycle", "lang": "st", "source": ST_CYCLE}]}}
     plc = b.part("el.plc", 640, 340, "PLC1", params=params)
+    pins = plc.terminals()
     start = b.part("el.pushbutton.no.iec", 360, 190, "S0", "Start")
     home = b.part("el.switch.limit.no", 360, 250, "S1", "Home", props={"Senses": "A1 retracted"})
     end = b.part("el.switch.limit.no", 360, 310, "S2", "End", props={"Senses": "A1 extended"})
-    pt = b.part("el.sensor.analog", 440, 410, "PT1", "0-250 bar 0-10 V")
+    pt = b.part("el.sensor.analog", 440, pins["AI0"][1], "PT1", "0-250 bar 0-10 V")
+    plus_y = pt.terminals()["+"][1]
+    b.line((300, 90), (300, plus_y))        # what feeds the inputs
     for device, y in ((start, 190), (home, 250), (end, 310)):
         b.tee(device, "1", (300, y))
-    b.wire(start, "2", plc, "I0", via=[(530, 190), (530, 250)])
-    b.wire(home, "2", plc, "I1", via=[(510, 250), (510, 270)])
-    b.wire(end, "2", plc, "I2", via=[(490, 310), (490, 290)])
-    b.tee(pt, "+", (300, 400))
-    b.tee(pt, "-", (380, 640), via=[(380, 420)])
+    b.wire(start, "2", plc, "I0", via=[(530, 190), (530, pins["I0"][1])])
+    b.wire(home, "2", plc, "I1", via=[(510, 250), (510, pins["I1"][1])])
+    b.wire(end, "2", plc, "I2", via=[(490, 310), (490, pins["I2"][1])])
+    b.tee(pt, "+", (300, plus_y))
+    b.tee(pt, "-", (380, 640), via=[(380, pt.terminals()["-"][1])])
     b.wire(pt, "OUT", plc, "AI0")
-    estop = b.part("el.estop", 610, 150, "S9", **DOWN)
-    b.tee(estop, "1", (610, 90))
+    estop = b.part("el.estop", pins["L+"][0], 150, "S9", **DOWN)
+    b.tee(estop, "1", (pins["L+"][0], 90))
     b.wire(estop, "2", plc, "L+")
-    b.tee(plc, "M", (640, 640))
+    b.tee(plc, "M", (pins["M"][0], 640))
     lamp = b.part("el.lamp.iec", 780, 400, "H1", "Moving", **DOWN)
     yb = b.part("el.coil.valve", 850, 400, "Y1b", "24 V 10 W")
     ya = b.part("el.coil.valve", 920, 400, "Y1a", "24 V 10 W")
-    b.wire(plc, "Q0", ya, "A1", via=[(920, 250)])
-    b.wire(plc, "Q1", yb, "A1", via=[(850, 270)])
-    b.wire(plc, "Q2", lamp, "1", via=[(780, 290)])
+    b.wire(plc, "Q0", ya, "A1", via=[(920, pins["Q0"][1])])
+    b.wire(plc, "Q1", yb, "A1", via=[(850, pins["Q1"][1])])
+    b.wire(plc, "Q2", lamp, "1", via=[(780, pins["Q2"][1])])
     for load, pin in ((lamp, "2"), (yb, "A2"), (ya, "A2")):
         x = load.terminals()[pin][0]
         b.tee(load, pin, (x, 640))
@@ -372,7 +379,7 @@ def relay_latch():
     start = b.part("el.pushbutton.no.nema", 320, y, "S1", "Start")
     dwell = b.part("el.contact.nc.nema", 480, y, "KT1")
     k1 = b.part("el.coil.nema", 760, y, "K1")
-    hold = b.part("el.contact.no.nema", 320, y + 60, "K1")
+    hold = b.part("el.contact.no.nema", 320, y + 60, "K1", numbered=("13", "14"))
     b.tee(stop, "1", (x0, y))
     b.wire(stop, "2", start, "1")
     b.wire(start, "2", dwell, "1")
@@ -381,13 +388,13 @@ def relay_latch():
     b.tee(hold, "1", (260, y), via=[(260, y + 60)])
     b.tee(hold, "2", (400, y), via=[(400, y + 60)])
     y = 270     # rung 2: extend while the latch holds
-    c = b.part("el.contact.no.nema", 320, y, "K1")
+    c = b.part("el.contact.no.nema", 320, y, "K1", numbered=("23", "24"))
     ya = b.part("el.coil.nema", 760, y, "Y1a")
     b.tee(c, "1", (x0, y))
     b.wire(c, "2", ya, "1")
     b.tee(ya, "2", (x1, y))
     y = 340     # rung 3: otherwise retract, until home
-    c = b.part("el.contact.nc.nema", 320, y, "K1")
+    c = b.part("el.contact.nc.nema", 320, y, "K1", numbered=("31", "32"))
     home = b.part("el.switch.limit.nc", 480, y, "S2", "Home", props={"Senses": "A1 retracted"})
     yb = b.part("el.coil.nema", 760, y, "Y1b")
     b.tee(c, "1", (x0, y))
@@ -395,7 +402,7 @@ def relay_latch():
     b.wire(home, "2", yb, "1")
     b.tee(yb, "2", (x1, y))
     y = 420     # rung 4: lamp
-    c = b.part("el.contact.no.nema", 320, y, "K1")
+    c = b.part("el.contact.no.nema", 320, y, "K1", numbered=("43", "44"))
     lamp = b.part("el.lamp.iec", 760, y, "H1", "Cycle running")
     b.tee(c, "1", (x0, y))
     b.wire(c, "2", lamp, "1")
@@ -442,10 +449,10 @@ def motor_starter():
     x0, x1 = ladder_rails(b, 140, 410)
     y = 140     # the start/stop latch, broken by the overload
     stop = b.part("el.pushbutton.nc.nema", 200, y, "S0", "Stop")
-    trip = b.part("el.contact.nc.nema", 300, y, "F1")
+    trip = b.part("el.contact.nc.nema", 300, y, "F1", numbered=("95", "96"))
     start = b.part("el.pushbutton.no.nema", 420, y, "S1", "Start")
     coil = b.part("el.coil.nema", 760, y, "K1")
-    hold = b.part("el.contact.no.nema", 420, y + 60, "K1")
+    hold = b.part("el.contact.no.nema", 420, y + 60, "K1", numbered=("13", "14"))
     b.tee(stop, "1", (x0, y))
     b.wire(stop, "2", trip, "1")
     b.wire(trip, "2", start, "1")
@@ -453,10 +460,10 @@ def motor_starter():
     b.tee(coil, "2", (x1, y))
     b.tee(hold, "1", (360, y), via=[(360, y + 60)])
     b.tee(hold, "2", (500, y), via=[(500, y + 60)])
-    for y, tag, symbol, lamp_tag, text in ((270, "K1", "el.contact.no.nema", "H1", "Running"),
-                                           (340, "S3", "el.switch.pressure.no", "H2", "Pressure OK"),
-                                           (410, "F1", "el.contact.no.nema", "H3", "Overload")):
-        c = b.part(symbol, 420, y, tag)
+    for y, tag, symbol, numbers, lamp_tag, text in ((270, "K1", "el.contact.no.nema", ("23", "24"), "H1", "Running"),
+                                                    (340, "S3", "el.switch.pressure.no", None, "H2", "Pressure OK"),
+                                                    (410, "F1", "el.contact.no.nema", ("97", "98"), "H3", "Overload")):
+        c = b.part(symbol, 420, y, tag, numbered=numbers)
         lamp = b.part("el.lamp.iec", 760, y, lamp_tag, text)
         b.tee(c, "1", (x0, y))
         b.wire(c, "2", lamp, "1")
