@@ -1,4 +1,4 @@
-"""FluidWorx - free and open-source hydraulic and pneumatic circuit simulator.
+"""FluidWorx - free and open-source hydraulic, pneumatic and electrical circuit simulator.
 
 Copyright (C) 2026 Nate Robertson
 

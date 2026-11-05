@@ -9,7 +9,7 @@ import os
 import tempfile
 from datetime import datetime
 
-from . import APP_NAME, VERSION, catalog
+from . import APP_NAME, VERSION, catalog, electric
 from .engine import Actuator
 from .units import Units
 from .vendor.openschematix.connectivity import analyse
@@ -74,6 +74,43 @@ def pressure_color(p: float, pmax: float, dark: bool = False) -> str:
     return "#%02x%02x%02x" % stops[-1][1]
 
 
+def voltage_color(net, node, dark: bool = False) -> str:
+    """The same colours for voltage, from blue at 0 V to red at the full voltage of that wire's own circuit."""
+    return pressure_color(abs(net.v[node]), net.nominal(node), dark)
+
+
+def _choice_shown(d, value):
+    return d.choices[max(0, min(len(d.choices) - 1, int(round(value))))]
+
+
+def electrical_rows(circuit, sim, units):
+    """Supplies and protection against what they carried, and what's connected: the engineering check of a drawing."""
+    supplies, protection = [], []
+    loads: dict = {}
+    of = circuit.el_circuit_of
+    for b in sim.net.parts:
+        if isinstance(b, (electric.Coil, electric.Load)) and not getattr(b, "proportional", False):
+            r = b.rated()
+            loads[of.get(b.t[b.names[0]])] = loads.get(of.get(b.t[b.names[0]]), 0.0) + b.g() * r * r
+        elif isinstance(b, electric.Motor3):
+            loads[of.get(b.t[b.names[0]])] = loads.get(of.get(b.t[b.names[0]]), 0.0) + b.par["power"]
+        elif isinstance(b, electric.Plc):
+            loads[of.get(b.t["L+"])] = loads.get(of.get(b.t["L+"]), 0.0) + b.par["power"]
+    for b in sim.net.parts:
+        if isinstance(b, electric.Source):
+            v = abs(b.emf())
+            limit = b.limit()
+            connected = loads.get(of.get(b.t[b.plus]), 0.0)
+            supplies.append((b.part.tag, units.fmt("voltage", v), units.fmt("current", b.peak),
+                             units.fmt("current", limit) if limit else "not set", units.fmt("power", connected),
+                             units.fmt("current", connected / v if v else 0.0)))
+        elif isinstance(b, electric.Protection):
+            rating = b.par["rating"]
+            protection.append((b.part.tag, units.fmt("current", rating), units.fmt("current", b.peak),
+                               f"{100.0 * b.peak / rating:.0f}%", b.status()))
+    return supplies, protection
+
+
 def svg_snapshot(doc, circuit, sim, project) -> str:
     """The sheet as it stands now, wires coloured by pressure. Valves are drawn as in the schematic."""
     pmax = sim.max_pressure()
@@ -96,6 +133,9 @@ def svg_snapshot(doc, circuit, sim, project) -> str:
             node = circuit.wire_nodes.get((doc.uid, it.get("item")))
             if node is not None:
                 return pressure_color(sim.p[node], pmax)
+            node = circuit.el_wire_nodes.get((doc.uid, it.get("item")))
+            if node is not None:
+                return voltage_color(sim.net, node)
             return "#0b4f9c"
         return "#8a939d" if it.get("role") == "frame" else "#14181d"
     for it in scene(doc, screen=False, conn=analyse(doc), project=project, frame=False):
@@ -185,7 +225,7 @@ def html_report(study, circuit, sim, units: Units, doc, title: str = "") -> str:
     for p in circuit.parts:
         for d in catalog.PARAMS.get(p.kind, []):
             if d.quantity == "choice":
-                shown = d.choices[int(p.params[d.key] >= 0.5)]
+                shown = _choice_shown(d, p.params[d.key])
             else:
                 shown = units.fmt(d.quantity, p.params[d.key])
             origin = "drawing" if d.key in p.from_schematic else "default"
@@ -208,8 +248,22 @@ def html_report(study, circuit, sim, units: Units, doc, title: str = "") -> str:
                 "indicative; it is not a sizing tool or evidence that a circuit is safe.</p>",
                 f"<h2>Circuit at {sim.time:.2f} s</h2>", svg_snapshot(doc, circuit, sim, circuit.project),
                 '<p class="muted">Line colours show pressure at this moment, from blue at tank to red at '
-                f"{e(units.fmt('pressure', sim.max_pressure()))}. Valves and cylinders are drawn in their rest "
-                "positions; their state is listed below.</p>"]
+                f"{e(units.fmt('pressure', sim.max_pressure()))}"
+                + (", and voltage, from blue at 0 V to red at the full voltage of that circuit" if circuit.electrical_parts else "")
+                + ". Parts are drawn in their rest positions; their state is listed below.</p>"]
+    if circuit.electrical_parts:
+        sections.append('<p class="note">Electrical results are logic and approximate loads: AC is carried at its RMS value, '
+                        "with no waveforms, and contacts and relays act instantly. Fuse and breaker times are indicative. "
+                        "This is not a protection study or a check of wiring against a standard.</p>")
+        supplies, protection = electrical_rows(circuit, sim, units)
+        if supplies:
+            sections.append("<h2>Supplies</h2><table><tr><th>Supply</th><th>Voltage</th><th>Peak current so far</th><th>Its limit</th>"
+                            "<th>Connected load</th><th>at</th></tr>"
+                            + "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in row) + "</tr>" for row in supplies) + "</table>")
+        if protection:
+            sections.append("<h2>Protection</h2><table><tr><th>Part</th><th>Rating</th><th>Peak current so far</th><th>Of rating</th>"
+                            "<th>State</th></tr>"
+                            + "".join("<tr>" + "".join(f"<td>{e(c)}</td>" for c in row) + "</tr>" for row in protection) + "</table>")
     if time_rows:
         sections.append("<h2>Measured strokes</h2><table><tr><th>Actuator</th><th>Extend</th><th>Retract</th></tr>"
                         + "".join(time_rows) + "</table>")

@@ -22,7 +22,7 @@ class B:
         self.project = new_project(title=title, size="A3")
         self.project.meta["title"] = title
         self.doc = self.project.sheets[0]
-        self.doc.name = "Pneumatics" if "neumatic" in title else "Hydraulics"
+        self.doc.name = "Pneumatics" if "neumatic" in title or "Relay" in title else "Hydraulics"
         self.doc.sheet.title = title
         self.n = 1
 
@@ -62,8 +62,21 @@ class B:
         self.doc.wires[w.id] = w
         return w
 
+    def line(self, *points):
+        """A wire with no terminal at either end: a rail, or a bus."""
+        w = Wire(id=self._id(), points=self._ortho(list(points)), start=None, end=None)
+        self.doc.wires[w.id] = w
+        return w
+
+    def sheet(self, name):
+        """Carry on drawing on a new sheet."""
+        self.doc = self.project.add_sheet(name)
+        self.doc.sheet.title = self.project.meta["title"]
+        return self.doc
+
     def save(self, name):
-        self.doc.next_id = self.n + 1
+        for doc in self.project.sheets:
+            doc.next_id = self.n + 1
         projectio.save_project(self.project, str(OUT / name))
 
 
@@ -254,6 +267,247 @@ def pneumatic_single():
     b.save("pneumatic_single_acting.schematix")
 
 
+DOWN = {"rot": 270, "mirror": True}      # a two-terminal part drawn with terminal 1 at the top
+ST_CYCLE = """(* Press Start with the rod home to extend it. At the end of its stroke, or if the pressure
+   says it has met something, it comes back on its own. *)
+IF Start AND AtHome THEN Extending := TRUE; END_IF;
+IF AtEnd OR Pressure > 90.0 THEN Extending := FALSE; END_IF;
+Extend := Extending;
+Retract := NOT Extending AND NOT AtHome;
+Moving := Extend OR Retract;
+"""
+
+
+def cylinder_sheet(b, tag_valve, label="50/28x200", flow="10 L/min", relief="100 bar"):
+    """The hydraulics of the electrical examples: a pump, a 4/3 double-solenoid valve and a cylinder."""
+    cyl = b.part("fl.hyd.cyl.double", 710, 240, "A1", label, rot=180, mirror=True)
+    v = b.part("fl.hyd.dcv", 700, 400, tag_valve, params=v43())
+    pump = b.part("fl.hyd.pump", 500, 580, "P1", flow)
+    t1 = b.part("fl.hyd.tank", 500, 660, "Z1")
+    rv = b.part("fl.hyd.relief", 600, 530, "V2", relief, rot=180)
+    t2 = b.part("fl.hyd.tank", 600, 610, "Z2")
+    f = b.part("fl.hyd.filter", 800, 510, "Z3", rot=90)
+    t3 = b.part("fl.hyd.tank", 800, 590, "Z4")
+    b.wire(pump, "S", t1, "T")
+    b.wire(pump, "P", v, "P", via=[(500, 480), (690, 480)])
+    b.tee(rv, "P", (600, 480))
+    b.wire(rv, "T", t2, "T")
+    b.wire(v, "T", f, "1", via=[(710, 460), (800, 460)])
+    b.wire(f, "2", t3, "T")
+    b.wire(v, "A", cyl, "A")
+    b.wire(v, "B", cyl, "B", via=[(710, 350), (720, 350)])
+    return cyl, v, pump
+
+
+def plc_cylinder():
+    b = B("PLC running a cylinder, with position and pressure feedback")
+    _cyl, v, _pump = cylinder_sheet(b, "Y1")
+    ax = v.terminals()["A"][0]
+    pt_h = b.part("fl.hyd.pressure.transducer", 620, 290, "PT1", "0-250 bar")
+    b.tee(pt_h, "P", (ax, 340), via=[(620, 340)])
+    b.sheet("Control")
+    psu = b.part("el.psu", 170, 365, "G1", "24 V 5 A")
+    b.line(psu.terminals()["+"], (230, 355), (230, 90), (610, 90))
+    b.line(psu.terminals()["-"], (230, 375), (230, 640), (920, 640))
+    b.tee(b.part("el.rail.pos", 300, 50, label="+24V"), "1", (300, 90))
+    b.tee(b.part("el.rail.neg", 300, 680, label="0V"), "1", (300, 640))
+    b.line((300, 90), (300, 400))       # what feeds the inputs
+    params = {"di": 8, "do": 6, "ai": 2, "ao": 1, "do_type": "source",
+              "tags": {"I0": "Start", "I1": "AtHome", "I2": "AtEnd", "AI0": "Pressure", "Q0": "Extend", "Q1": "Retract", "Q2": "Moving"},
+              "program": {"scan_ms": 10, "io": {"AI0": {"signal": "0-10V", "lo": 0, "hi": 250, "note": "PT1, bar"}},
+                          "vars": [{"name": "Extending", "type": "BOOL", "init": "", "note": "the rod is on its way out"}],
+                          "pous": [{"name": "Cycle", "lang": "st", "source": ST_CYCLE}]}}
+    plc = b.part("el.plc", 640, 340, "PLC1", params=params)
+    start = b.part("el.pushbutton.no.iec", 360, 190, "S0", "Start")
+    home = b.part("el.switch.limit.no", 360, 250, "S1", "Home", props={"Senses": "A1 retracted"})
+    end = b.part("el.switch.limit.no", 360, 310, "S2", "End", props={"Senses": "A1 extended"})
+    pt = b.part("el.sensor.analog", 440, 410, "PT1", "0-250 bar 0-10 V")
+    for device, y in ((start, 190), (home, 250), (end, 310)):
+        b.tee(device, "1", (300, y))
+    b.wire(start, "2", plc, "I0", via=[(530, 190), (530, 250)])
+    b.wire(home, "2", plc, "I1", via=[(510, 250), (510, 270)])
+    b.wire(end, "2", plc, "I2", via=[(490, 310), (490, 290)])
+    b.tee(pt, "+", (300, 400))
+    b.tee(pt, "-", (380, 640), via=[(380, 420)])
+    b.wire(pt, "OUT", plc, "AI0")
+    estop = b.part("el.estop", 610, 150, "S9", **DOWN)
+    b.tee(estop, "1", (610, 90))
+    b.wire(estop, "2", plc, "L+")
+    b.tee(plc, "M", (640, 640))
+    lamp = b.part("el.lamp.iec", 780, 400, "H1", "Moving", **DOWN)
+    yb = b.part("el.coil.valve", 850, 400, "Y1b", "24 V 10 W")
+    ya = b.part("el.coil.valve", 920, 400, "Y1a", "24 V 10 W")
+    b.wire(plc, "Q0", ya, "A1", via=[(920, 250)])
+    b.wire(plc, "Q1", yb, "A1", via=[(850, 270)])
+    b.wire(plc, "Q2", lamp, "1", via=[(780, 290)])
+    for load, pin in ((lamp, "2"), (yb, "A2"), (ya, "A2")):
+        x = load.terminals()[pin][0]
+        b.tee(load, pin, (x, 640))
+    b.save("plc_cylinder.schematix")
+
+
+def ladder_rails(b, first, last, x0=120, x1=900, plus="+24V", minus="0V"):
+    """The two sides of a ladder, from the first rung to the last, with what they are named at the ends."""
+    b.tee(b.part("el.rail.pos", x0, first - 100, label=plus), "1", (x0, first - 60))
+    b.tee(b.part("el.rail.neg", x1, last + 100, label=minus), "1", (x1, last + 60))
+    b.line((x0, first - 60), (x0, last))
+    b.line((x1, first), (x1, last + 60))
+    return x0, x1
+
+
+def relay_latch():
+    b = B("Relay logic: start, stop and automatic return")
+    cyl = b.part("fl.pneu.cyl.double", 600, 150, "A1", "40/16x150", props={"Load": "100"})
+    v = b.part("fl.pneu.dcv", 620, 430, "Y1", params={"medium": "pneu", "type": "5/2", "positions": ["1-4", "1-2"],
+                                                       "left": ["solenoid"], "right": ["solenoid"]})
+    comp = b.part("fl.pneu.compressor", 360, 540, "P1", "6 bar", rot=90)
+    t = v.terminals()
+    b.wire(comp, "2", v, "1", via=[(t["1"][0], comp.terminals()["2"][1])])
+    b.wire(v, "4", cyl, "A", via=[(t["4"][0], 300), (cyl.terminals()["A"][0], 300)])
+    b.wire(v, "2", cyl, "B", via=[(t["2"][0], 340), (690, 340), (690, 110), (cyl.terminals()["B"][0], 110)])
+    b.sheet("Relay logic")
+    x0, x1 = ladder_rails(b, 140, 500)
+    y = 140     # rung 1: the latch, broken by the timer that runs at the end of the stroke
+    stop = b.part("el.pushbutton.nc.nema", 200, y, "S0", "Stop")
+    start = b.part("el.pushbutton.no.nema", 320, y, "S1", "Start")
+    dwell = b.part("el.contact.nc.nema", 480, y, "KT1")
+    k1 = b.part("el.coil.nema", 760, y, "K1")
+    hold = b.part("el.contact.no.nema", 320, y + 60, "K1")
+    b.tee(stop, "1", (x0, y))
+    b.wire(stop, "2", start, "1")
+    b.wire(start, "2", dwell, "1")
+    b.wire(dwell, "2", k1, "1")
+    b.tee(k1, "2", (x1, y))
+    b.tee(hold, "1", (260, y), via=[(260, y + 60)])
+    b.tee(hold, "2", (400, y), via=[(400, y + 60)])
+    y = 270     # rung 2: extend while the latch holds
+    c = b.part("el.contact.no.nema", 320, y, "K1")
+    ya = b.part("el.coil.nema", 760, y, "Y1a")
+    b.tee(c, "1", (x0, y))
+    b.wire(c, "2", ya, "1")
+    b.tee(ya, "2", (x1, y))
+    y = 340     # rung 3: otherwise retract, until home
+    c = b.part("el.contact.nc.nema", 320, y, "K1")
+    home = b.part("el.switch.limit.nc", 480, y, "S2", "Home", props={"Senses": "A1 retracted"})
+    yb = b.part("el.coil.nema", 760, y, "Y1b")
+    b.tee(c, "1", (x0, y))
+    b.wire(c, "2", home, "1")
+    b.wire(home, "2", yb, "1")
+    b.tee(yb, "2", (x1, y))
+    y = 420     # rung 4: lamp
+    c = b.part("el.contact.no.nema", 320, y, "K1")
+    lamp = b.part("el.lamp.iec", 760, y, "H1", "Cycle running")
+    b.tee(c, "1", (x0, y))
+    b.wire(c, "2", lamp, "1")
+    b.tee(lamp, "2", (x1, y))
+    y = 500     # rung 5: dwell at the end of the stroke
+    end = b.part("el.switch.limit.no", 320, y, "S3", "End", props={"Senses": "A1 extended"})
+    timer = b.part("el.coil.ondelay", 760, y, "KT1", "1 s", rot=270)
+    b.tee(end, "1", (x0, y))
+    b.wire(end, "2", timer, "A1")
+    b.tee(timer, "A2", (x1, y))
+    b.save("relay_latch.schematix")
+
+
+def motor_starter():
+    b = B("Three-phase starter driving a hydraulic pump")
+    pump = b.part("fl.hyd.pump", 500, 500, "P1", "20 L/min", props={"Driven by": "M1"})
+    t1 = b.part("fl.hyd.tank", 500, 580, "Z1")
+    rv = b.part("fl.hyd.relief", 640, 420, "V1", "100 bar", rot=180)
+    t2 = b.part("fl.hyd.tank", 640, 500, "Z2")
+    gauge = b.part("fl.hyd.gauge", 420, 310, "G1")
+    ps = b.part("fl.hyd.pressure.switch", 560, 310, "S3", "80 bar")
+    b.wire(pump, "S", t1, "T")
+    b.line(pump.terminals()["P"], (500, 370), (640, 370))
+    b.wire(rv, "T", t2, "T")
+    b.tee(rv, "P", (640, 370))
+    b.tee(gauge, "P", (500, 370), via=[(420, 370)])
+    b.tee(ps, "X", (560, 370))
+    b.sheet("Power")
+    xs = (300, 320, 340)
+    for x, name, rx in zip(xs, ("L1", "L2", "L3"), (260, 320, 380)):
+        rail = b.part("el.rail.pos", rx, 50, label=name)
+        b.line(rail.terminals()["1"], (rx, 90), (x, 90), (x, 110))
+    q1 = b.part("el.breaker.3p", 320, 130, "Q1", "16 A", rot=270, mirror=True)
+    k1 = b.part("el.contact.3no", 320, 210, "K1", rot=270, mirror=True)
+    f1 = b.part("el.overload.3p", 320, 290, "F1", "5 A", rot=270, mirror=True)
+    motor = b.part("el.motor.3ph", 320, 380, "M1", "3 kW")
+    for up, down in ((q1, k1), (k1, f1)):
+        for a, c in (("2", "1"), ("4", "3"), ("6", "5")):
+            b.wire(up, a, down, c)
+    b.wire(f1, "2", motor, "U1", via=[(300, 340), (310, 340)])
+    b.wire(f1, "4", motor, "V1")
+    b.wire(f1, "6", motor, "W1", via=[(340, 340), (330, 340)])
+    b.sheet("Control")
+    x0, x1 = ladder_rails(b, 140, 410)
+    y = 140     # the start/stop latch, broken by the overload
+    stop = b.part("el.pushbutton.nc.nema", 200, y, "S0", "Stop")
+    trip = b.part("el.contact.nc.nema", 300, y, "F1")
+    start = b.part("el.pushbutton.no.nema", 420, y, "S1", "Start")
+    coil = b.part("el.coil.nema", 760, y, "K1")
+    hold = b.part("el.contact.no.nema", 420, y + 60, "K1")
+    b.tee(stop, "1", (x0, y))
+    b.wire(stop, "2", trip, "1")
+    b.wire(trip, "2", start, "1")
+    b.wire(start, "2", coil, "1")
+    b.tee(coil, "2", (x1, y))
+    b.tee(hold, "1", (360, y), via=[(360, y + 60)])
+    b.tee(hold, "2", (500, y), via=[(500, y + 60)])
+    for y, tag, symbol, lamp_tag, text in ((270, "K1", "el.contact.no.nema", "H1", "Running"),
+                                           (340, "S3", "el.switch.pressure.no", "H2", "Pressure OK"),
+                                           (410, "F1", "el.contact.no.nema", "H3", "Overload")):
+        c = b.part(symbol, 420, y, tag)
+        lamp = b.part("el.lamp.iec", 760, y, lamp_tag, text)
+        b.tee(c, "1", (x0, y))
+        b.wire(c, "2", lamp, "1")
+        b.tee(lamp, "2", (x1, y))
+    b.save("motor_starter_pump.schematix")
+
+
+def electronics():
+    b = B("Electronics: a comparator and a transistor switch a relay")
+    b.doc.name = "Electronics"
+    top, bottom = 80, 520
+    b.line((160, top), (800, top))
+    b.line((160, bottom), (800, bottom))
+    src = b.part("el.source.dc", 160, 300, "G1", "12 V", rot=90)
+    b.line(src.terminals()["+"], (160, top))
+    b.line(src.terminals()["-"], (160, bottom))
+    b.tee(b.part("el.earth", 220, 560), "1", (220, bottom))
+    pot = b.part("el.potentiometer.iec", 260, 300, "R1", "10k", rot=90)
+    b.line(pot.terminals()["1"], (260, top))
+    b.line(pot.terminals()["2"], (260, bottom))
+    r2 = b.part("el.resistor.iec", 340, 180, "R2", "4.7k", rot=90)
+    r3 = b.part("el.resistor.iec", 340, 420, "R3", "10k", rot=90)
+    b.line(r2.terminals()["1"], (340, top))
+    b.wire(r2, "2", r3, "1")
+    b.line(r3.terminals()["2"], (340, bottom))
+    op = b.part("el.opamp.supply", 470, 300, "U1")
+    b.wire(pot, "3", op, "+")
+    b.tee(op, "-", (340, op.terminals()["-"][1]))
+    b.line(op.terminals()["V+"], (470, top))
+    b.line(op.terminals()["V-"], (470, bottom))
+    r4 = b.part("el.resistor.iec", 570, 300, "R4", "1k")
+    q = b.part("el.npn", 640, 300, "Q1")
+    b.wire(op, "OUT", r4, "1")
+    b.wire(r4, "2", q, "B")
+    b.line(q.terminals()["E"], (650, bottom))
+    coil = b.part("el.coil.iec", 650, 200, "K1", "12 V 2 W")
+    b.line(coil.terminals()["A1"], (650, top))
+    b.wire(coil, "A2", q, "C")
+    d1 = b.part("el.diode", 710, 200, "D1", rot=270)
+    b.line(d1.terminals()["K"], (710, top))
+    b.tee(d1, "A", (650, 250), via=[(710, 250)])
+    contact = b.part("el.contact.no.iec", 800, 150, "K1", **DOWN)
+    r5 = b.part("el.resistor.iec", 800, 240, "R5", "1k", rot=90)
+    led = b.part("el.led", 800, 340, "H1", rot=90)
+    b.line(contact.terminals()["1"], (800, top))
+    b.wire(contact, "2", r5, "1")
+    b.wire(r5, "2", led, "A")
+    b.line(led.terminals()["K"], (800, bottom))
+    b.save("electronics_threshold.schematix")
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     lift()
@@ -263,6 +517,10 @@ def main():
     accumulator()
     pneumatic()
     pneumatic_single()
+    plc_cylinder()
+    relay_latch()
+    motor_starter()
+    electronics()
     print("wrote", sorted(p.name for p in OUT.iterdir()))
 
 

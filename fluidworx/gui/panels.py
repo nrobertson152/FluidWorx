@@ -1,10 +1,11 @@
-"""Sidebars and dock: circuit list, properties, trace chart, events, checks."""
+"""Sidebars and dock: circuit list, properties, trace chart, events, checks, links."""
 from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
 
-from .. import catalog, engine, units as units_mod
+from .. import catalog, electric, engine, units as units_mod
+from ..vendor.openschematix import simlinks
 from ..vendor.openschematix.gui import theme as th
 from ..vendor.openschematix.gui.widgets import IconButton, PanelHeader, ScrollFrame, Section, Tooltip
 
@@ -15,8 +16,17 @@ GROUPS = [("Supply", ("pump", "pump_pc", "compressor")),
                        "shuttle", "throttle", "oneway", "flow_pc")),
           ("Storage", ("accumulator", "receiver")),
           ("Instruments", ("gauge", "pressure_switch")),
+          ("PLC", ("plc",)),
+          ("Electrical supply", ("source_v", "source_i", "psu", "rectifier", "regulator", "transformer", "autotransformer")),
+          ("Protection", ("fuse", "breaker", "breaker3", "overload")),
+          ("Switches", ("button", "selector", "changeover", "selector4", "switch_manual")),
+          ("Sensors", ("limit", "pressure_contact", "prox", "sensor_analog", "sensor_loop")),
+          ("Relays", ("coil", "coil_on", "coil_off", "relay", "contact")),
+          ("Loads", ("lamp", "buzzer", "emotor", "emotor3", "meter_v", "meter_a")),
+          ("Electronics", ("resistor", "pot", "capacitor", "inductor", "diode", "zener", "led", "bjt", "fet", "scr", "opamp", "logic")),
           ("Inline", None)]
-HIDDEN_KINDS = ("tank", "plug")
+HIDDEN_KINDS = ("tank", "plug", "ground", "rail", "point", "feedthrough")
+MEDIUM_NAMES = {"hyd": "Hydraulic", "pneu": "Pneumatic", "el": "Electrical"}
 
 
 def _scroll(parent, widget):
@@ -103,6 +113,8 @@ class Inspector(ScrollFrame):
         self.key = None
         self.read_vars = []
         self.action_buttons = {}
+        self.watch_rows = {}
+        self.watch_holder = None
         self.status_var = tk.StringVar()
         self.show(None)
 
@@ -111,6 +123,8 @@ class Inspector(ScrollFrame):
         self.clear()
         self.read_vars = []
         self.action_buttons = {}
+        self.watch_rows = {}
+        self.watch_holder = None
         app = self.app
         part = app.circuit.part(key) if key is not None and app.circuit else None
         if part is None:
@@ -120,7 +134,7 @@ class Inspector(ScrollFrame):
         head.pack(fill="x")
         ttk.Label(head, text=part.title, style="Title.TLabel", wraplength=250).pack(anchor="w")
         ttk.Label(head, text=part.symbol_name, style="Muted.TLabel", wraplength=250, justify="left").pack(anchor="w")
-        medium = {"hyd": "Hydraulic", "pneu": "Pneumatic"}[part.medium]
+        medium = MEDIUM_NAMES.get(part.medium, "")
         ttk.Label(head, text=f"{medium} · {catalog.KIND_NAMES.get(part.kind, part.kind)}", style="Faint.TLabel").pack(anchor="w")
         b = app.sim.parts[key]
         sec = Section(self.inner, "State")
@@ -141,6 +155,12 @@ class Inspector(ScrollFrame):
                 btn = ttk.Button(s2.body, text=label, command=lambda n=name: app.command(key, n))
                 s2.add_full(btn)
                 self.action_buttons[name] = (btn, label)
+                if isinstance(b, electric.Button) and name == "toggle":
+                    s2.add_full(ttk.Label(s2.body, text="Or hold the mouse down on it on the drawing.", style="Faint.TLabel",
+                                          wraplength=250, justify="left"))
+        if isinstance(b, electric.Plc):
+            self._plc_section(b)
+        self._links_section(part)
         defs = catalog.PARAMS.get(part.kind, [])
         if defs:
             s3 = Section(self.inner, "Parameters")
@@ -150,19 +170,78 @@ class Inspector(ScrollFrame):
             reset = ttk.Button(s3.body, text="Reset to drawing", style="Link.TButton",
                                command=lambda: app.reset_part_params(key))
             s3.add_full(reset, pady=(6, 0))
-        note = part.spec.approx or ("Its ports are treated as blocked." if part.kind == "unsupported" else "")
+        blocked = "Nothing passes through it." if part.medium == "el" else "Its ports are treated as blocked."
+        note = part.spec.approx or (blocked if part.kind == "unsupported" else "")
         if note:
             s4 = Section(self.inner, "Note")
             s4.pack(fill="x")
             s4.add_full(ttk.Label(s4.body, text=note, style="Warning.TLabel", wraplength=250, justify="left"))
         self.refresh()
 
+    def _plc_section(self, b):
+        """Its inputs, outputs and variables as they are right now."""
+        sec = Section(self.inner, "Program, live")
+        sec.pack(fill="x")
+        self.watch_holder = sec
+        for name, tag, _value in b.watch()[:80]:
+            var = tk.StringVar()
+            lab = ttk.Label(sec.body, textvariable=var, style="Surface.TLabel", anchor="e")
+            sec.add_row(f"{name} {tag}".strip(), lab)
+            self.watch_rows[name] = var
+        if b.rt.fault:
+            sec.add_full(ttk.Label(sec.body, text=b.rt.fault, style="Warning.TLabel", wraplength=250, justify="left"))
+        if not b.rt.ok:
+            for d in b.rt.program.errors[:6]:
+                sec.add_full(ttk.Label(sec.body, text=str(d), style="Warning.TLabel", wraplength=250, justify="left"))
+        sec.add_full(ttk.Label(sec.body, text="Edit the program in OpenSchematix: select the block, then Program PLC.",
+                               style="Faint.TLabel", wraplength=250, justify="left"), pady=(4, 0))
+
+    @staticmethod
+    def _show_value(value) -> str:
+        if value is None:
+            return "—"
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        if isinstance(value, float):
+            return units_mod._trim(value)
+        return str(value)[:24]
+
+    def _links_section(self, part):
+        """What this part is tied to, and the properties that tie it, which a study can set for itself."""
+        app = self.app
+        fields = simlinks.fields_for(part.comp)
+        here = [link for link in app.circuit.links if part.key in (link.source, link.target)]
+        if not fields and not here:
+            return
+        sec = Section(self.inner, "Linked to")
+        sec.pack(fill="x")
+        for link in here:
+            sec.add_full(ttk.Label(sec.body, text=link.text, style="Surface.TLabel", wraplength=250, justify="left"))
+        if not here:
+            sec.add_full(ttk.Label(sec.body, text="Nothing yet.", style="Faint.TLabel"))
+        own = app.study.links.get(f"{part.key[0]}/{part.key[1]}", {}) if app.study is not None else {}
+        for prop, label, tip in fields:
+            row = ttk.Frame(sec.body, style="Surface.TFrame")
+            var = tk.StringVar(value=part.comp.props.get(prop, ""))
+            cb = ttk.Combobox(row, textvariable=var, values=simlinks.suggestions(app.circuit.project, prop), width=18)
+            cb.pack(side="left", fill="x", expand=True)
+            hint = tip + (" Set in this study; the drawing isn't changed." if prop in own else " Set here, it stays in this study.")
+
+            def commit(_e=None, p=prop, v=var):
+                if v.get().strip() != part.comp.props.get(p, ""):
+                    app.set_link(part.key, p, v.get().strip())
+            cb.bind("<Return>", commit)
+            cb.bind("<<ComboboxSelected>>", commit)
+            cb.bind("<FocusOut>", commit)
+            sec.add_row(label, row, hint)
+
     def _empty(self):
         box = ttk.Frame(self.inner, style="Surface.TFrame", padding=16)
         box.pack(fill="x")
         ttk.Label(box, text="Nothing selected", style="Bold.TLabel").pack(anchor="w")
         ttk.Label(box, text="Click a part on the drawing to see its readings and change its values. Clicking a "
-                            "valve's left or right side operates it.", style="Muted.TLabel", wraplength=250,
+                            "valve's left or right side operates it, and so does clicking a switch. Hold the mouse "
+                            "down on a push-button to press it.", style="Muted.TLabel", wraplength=250,
                   justify="left").pack(anchor="w", pady=(4, 0))
 
     def _param_row(self, sec, part, d):
@@ -170,13 +249,13 @@ class Inspector(ScrollFrame):
         un = app.units
         row = ttk.Frame(sec.body, style="Surface.TFrame")
         if d.quantity == "choice":
-            var = tk.StringVar(value=d.choices[int(part.params[d.key] >= 0.5)])
+            var = tk.StringVar(value=d.choices[max(0, min(len(d.choices) - 1, int(round(part.params[d.key]))))])
             cb = ttk.Combobox(row, textvariable=var, values=d.choices, state="readonly", width=18)
             cb.pack(side="left", fill="x", expand=True)
             cb.bind("<<ComboboxSelected>>", lambda e: app.set_param(part.key, d.key, float(d.choices.index(var.get()))))
             sec.add_row(d.label, row, d.hint)
             return
-        var = tk.StringVar(value=un.number(d.quantity, part.params[d.key]))
+        var = tk.StringVar(value=un.number(d.quantity, part.params.get(d.key, 0.0)))
         ent = ttk.Entry(row, textvariable=var, width=9, justify="right")
         ent.pack(side="left", fill="x", expand=True)
         ttk.Label(row, text=un.label(d.quantity), style="Muted.TLabel", width=6).pack(side="left", padx=(4, 0))
@@ -199,7 +278,7 @@ class Inspector(ScrollFrame):
         if d.key in part.from_schematic:
             hint = (hint + " " if hint else "") + "Read from the drawing."
         sec.add_row(d.label, row, hint)
-        if d.quantity == "percent" and d.key == "opening":
+        if d.quantity == "percent" and d.key in ("opening", "wiper", "manual"):
             sc = ttk.Scale(sec.body, from_=0, to=100, value=part.params[d.key], orient="horizontal")
 
             def slide(v):
@@ -223,6 +302,11 @@ class Inspector(ScrollFrame):
             pair = self.action_buttons.get(name)
             if pair:
                 pair[0].configure(text=("● " if on else "") + label, style="Accent.TButton" if on else "TButton")
+        if self.watch_rows and isinstance(b, electric.Plc):
+            for name, _tag, value in b.watch():
+                var = self.watch_rows.get(name)
+                if var is not None:
+                    var.set(self._show_value(value))
 
 
 # Fixed categorical order, validated for colour-blind separation in both modes. Colour follows the channel, never
@@ -230,8 +314,9 @@ class Inspector(ScrollFrame):
 # past the eighth gets no invented hue: it is drawn muted and dashed and relies on its label.
 SERIES_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
-LANE_ORDER = ("length", "angle", "speed", "rpm", "pressure")
-LANE_TITLES = {"length": "Position", "angle": "Rotation", "speed": "Speed", "rpm": "Speed", "pressure": "Pressure"}
+LANE_ORDER = ("length", "angle", "speed", "rpm", "pressure", "state", "voltage", "current", "percent")
+LANE_TITLES = {"length": "Position", "angle": "Rotation", "speed": "Speed", "rpm": "Speed", "pressure": "Pressure",
+               "state": "On / off", "voltage": "Voltage", "current": "Current", "percent": "Reading"}
 WINDOWS = {"Last 10 s": 10.0, "Last 30 s": 30.0, "Last 2 min": 120.0, "All": None}
 
 
@@ -269,9 +354,18 @@ class TracePanel(ttk.Frame):
             self.draw()
             return
         picked_pressure = 0
+        # the signals that show what the logic is doing: coils first, then a PLC's outputs if there's room
+        rank = {}
+        for i, ch in enumerate(sim.trace.channels):
+            b = sim.parts.get(ch[0][0])
+            if ch[2] == "state" and isinstance(b, electric.Coil):
+                rank[i] = 0
+            elif ch[2] == "state" and isinstance(b, electric.Plc) and ch[0][1].startswith("Q"):
+                rank[i] = 1
+        picked_states = set(sorted(rank, key=lambda i: (rank[i], i))[:4])
         for i, ch in enumerate(sim.trace.channels):
             cid, label, q = ch[0], ch[1], ch[2]
-            on = False
+            on = i in picked_states
             if cid[1] == "x":
                 on = True
             elif q == "pressure" and picked_pressure < 3 and cid[1] == "p":
@@ -324,7 +418,17 @@ class TracePanel(ttk.Frame):
             lanes.setdefault(tr.channels[i][2], []).append(i)
         order = [q for q in LANE_ORDER if q in lanes]
         ml, mr, mt, mb = 62, 82, 8, 22
-        lane_h = (H - mt - mb) / max(1, len(order))
+        # on/off signals are read side by side, so they get the room they need and the other lanes share the rest
+        room = H - mt - mb
+        state_h = min(room * 0.7, 24 + 15 * len(lanes["state"])) if "state" in lanes else 0.0
+        others = len(order) - (1 if state_h else 0)
+        lane_h = (room - state_h) / others if others else 0.0
+        tops = []
+        y = mt
+        for q in order:
+            h = state_h if q == "state" else lane_h
+            tops.append((y, y + h))
+            y += h
         start = 0
         for k, x in enumerate(tr.times):
             if x >= t0:
@@ -333,8 +437,11 @@ class TracePanel(ttk.Frame):
         un = self.app.units
         titles = []
         for li, q in enumerate(order):
-            y0 = mt + li * lane_h + 18
-            y1 = mt + (li + 1) * lane_h - 6
+            y0 = tops[li][0] + 18
+            y1 = tops[li][1] - 6
+            if q == "state":
+                titles.append(self._draw_states(lanes[q], tr, start, t0, t1, ml, mr, W, y0, y1, q))
+                continue
             vals = [v for i in lanes[q] for v in tr.data[i][start:]]
             lo, hi = min(vals), max(vals)
             lo, hi = (min(lo, 0.0), max(hi, 0.0))
@@ -392,6 +499,30 @@ class TracePanel(ttk.Frame):
         self._xmap = (t0, t1, ml, W - mr, start)
         if self.hover_x is not None:
             self._draw_cursor()
+
+    def _draw_states(self, idxs, tr, start, t0, t1, ml, mr, W, y0, y1, q):
+        """On/off signals one above the other, the way a logic analyser shows them, so they can be read together."""
+        cv, u, f = self.cv, self.app.theme.ui, self.app.theme.fonts
+        title = cv.create_text(ml, y0 - 6, text=LANE_TITLES[q], anchor="sw", fill=u["muted"], font=f["heading"])
+        band = (y1 - y0) / max(1, len(idxs))
+        times = tr.times[start:]
+        for row, i in enumerate(idxs):
+            top = y0 + row * band + 1
+            bottom = y0 + (row + 1) * band - 2
+            cv.create_line(ml, bottom, W - mr, bottom, fill=u["border"])
+            pts, last = [], None
+            for x, val in zip(times, tr.data[i][start:]):
+                sx = ml + (x - t0) / max(t1 - t0, 1e-6) * (W - ml - mr)
+                y = top if val else bottom
+                if last is not None and y != last:
+                    pts += [sx, last]
+                pts += [sx, y]
+                last = y
+            if len(pts) >= 4:
+                cv.create_line(*pts, fill=self._color(i), width=2, joinstyle="miter", dash=(5, 3) if i >= len(SERIES_LIGHT) else None)
+            cv.create_text(W - mr + 6, (top + bottom) / 2, text=tr.channels[i][1], anchor="w", fill=u["text"], font=f["small"])
+        self._geom.append((q, idxs, None, y0, y1))
+        return title
 
     def _hover(self, e):
         self.hover_x = e.x
@@ -482,6 +613,42 @@ class EventsPanel(ttk.Frame):
     def clear(self):
         self.tree.delete(*self.tree.get_children())
         self.count = 0
+
+
+class LinksPanel(ttk.Frame):
+    """What ties the electrical side to the fluid side, and the relays to their contacts: found from the tags."""
+    KINDS = {"solenoid": "Solenoid", "contact": "Relay contact", "pressure": "Pressure switch", "sense": "Sensor",
+             "motor": "Motor", "overload": "Overload"}
+
+    def __init__(self, master, app):
+        super().__init__(master, style="Surface.TFrame")
+        self.app = app
+        self.tree = ttk.Treeview(self, columns=("kind", "text"), show="headings", selectmode="browse")
+        self.tree.heading("kind", text="Link", anchor="w")
+        self.tree.heading("text", text="The same tag means the same device. Set Senses, Solenoid a, Solenoid b or Driven by for what a tag can't say.", anchor="w")
+        self.tree.column("kind", width=120, stretch=False)
+        self.tree.column("text", width=700, stretch=True)
+        self.tree.pack(side="left", fill="both", expand=True)
+        _scroll(self, self.tree).pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self._pick)
+        self._map = {}
+
+    def rebuild(self):
+        self.tree.delete(*self.tree.get_children())
+        self._map = {}
+        c = self.app.circuit
+        if c is None:
+            return
+        for link in c.links:
+            iid = self.tree.insert("", "end", values=(self.KINDS.get(link.kind, link.kind), link.text))
+            self._map[iid] = link.target
+        if not c.links:
+            self.tree.insert("", "end", values=("None", "Nothing is linked in this circuit."))
+
+    def _pick(self, _e):
+        sel = self.tree.selection()
+        if sel and self._map.get(sel[0]):
+            self.app.select(self._map[sel[0]], reveal=True)
 
 
 class ChecksPanel(ttk.Frame):

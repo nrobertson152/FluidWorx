@@ -339,6 +339,21 @@ def test_a_sensor_naming_a_tag_nothing_has_is_reported():
     assert limit
 
 
+def test_a_switch_that_only_names_a_cylinder_is_told_it_needs_a_place():
+    d = Drawing()
+    d.add("fl.hyd.cyl.double", "A1", "50/28x200")
+    d.add("el.switch.limit.no", "S2", props={"Senses": "A1"})
+    c = d.build()
+    assert any("needs to know where" in i.text for i in c.issues) and not c.links
+
+
+def test_two_coils_with_one_tag_are_reported():
+    d = Drawing()
+    d.add("el.coil.iec", "K1")
+    d.add("el.coil.iec", "K1")
+    assert any("2 coils are tagged K1" in i.text for i in d.build().issues)
+
+
 def test_senses_it_cant_read_is_reported():
     d = Drawing()
     d.add("el.switch.limit.no", "S2", props={"Senses": "A1 sideways"})
@@ -780,6 +795,16 @@ def test_plc_input_needs_15_volts_on_a_24_volt_supply():
     assert at(15.1)
     assert at(6.0), "between the two it holds"
     assert not at(4.9)
+
+
+def test_too_much_on_a_plc_output_is_reported():
+    """A 20 W coil on a 0.5 A output: 0.83 A."""
+    params = plc_params(pous=[{"name": "Main", "lang": "st", "source": "Extend := TRUE;"}], vars=[])
+    d, r = plc_rig(params)
+    sim = d.sim()
+    sim.run(0.1)
+    assert any("Q0 is carrying 0.83 A" in text for _t, _tag, text in sim.events)
+    assert part(sim, r["plc"]).peak["Q0"] == pytest.approx(20.0 / 24.0, abs=0.01)
 
 
 def test_plc_input_draws_about_7_ma():

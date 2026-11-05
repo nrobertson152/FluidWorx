@@ -125,6 +125,18 @@ class Part:
         """Whether the part is doing what it does: the canvas draws it highlighted."""
         return False
 
+    def poles_now(self) -> list:
+        """(terminal, terminal, closed now, drawn closed) for what switches: the canvas shows it as it is, not as drawn."""
+        return []
+
+    def click_command(self):
+        """What a plain click on it does, if anything."""
+        return None
+
+    def badge(self, un) -> str:
+        """Short live text beside it on the drawing."""
+        return ""
+
     def _state_channel(self, label=""):
         return ((self.part.key, "state"), f"{self.part.tag} {label}".strip(), "state", lambda: 1.0 if self.is_on() else 0.0)
 
@@ -248,6 +260,7 @@ class Source(Part):
         self.plus, self.minus = self.terminals()
         self.limited = False
         self.shorted = False
+        self.peak = 0.0
 
     def terminals(self):
         return self.names[0], self.names[1]
@@ -302,6 +315,7 @@ class Source(Part):
     def commit(self, v, dt):
         emf = mag(self.emf())
         out = mag(v[self.t[self.plus]] - v[self.t[self.minus]])
+        self.peak = max(self.peak, mag(self.current_out(v)))
         short = self.live() and emf > 0 and out < 0.5 * emf and not self.limited
         if short and not self.shorted:
             self.net.sim.log(self.part.tag, f"Short circuit: it would supply {mag(self.current_out(v)):.0f} A")
@@ -310,6 +324,12 @@ class Source(Part):
     def reset(self):
         self.limited = False
         self.shorted = False
+        self.peak = 0.0
+
+    def badge(self, un):
+        if not self.live():
+            return "off"
+        return f"{un.fmt('voltage', mag(self.net.v[self.t[self.plus]] - self.net.v[self.t[self.minus]]))} · {un.fmt('current', mag(self.current_out(self.net.v)))}"
 
     def status(self, p=None):
         if not self.live():
@@ -864,7 +884,8 @@ class Thyristor(Part):
 
 
 class OpAmp(Part):
-    """High gain until the output reaches a supply pin less 1.5 V, or its set swing when no supply pins are drawn."""
+    """High gain until the output nears a supply pin: 1.5 V below V+ and 0.1 V above V-, as single-supply op-amps do. With
+    no supply pins drawn, its set swing."""
     quiet = True
     G_OUT = 0.1
 
@@ -879,8 +900,8 @@ class OpAmp(Part):
     def _limits(self, v):
         if self.has_supply:
             hi = v[self.t["V+"]].real - 1.5
-            lo = v[self.t["V-"]].real + 1.5
-            return (hi, lo) if hi > lo else (0.5 * (hi + lo), 0.5 * (hi + lo))
+            lo = v[self.t["V-"]].real + 0.1
+            return (hi, lo) if hi > lo else (lo, lo)
         return self.par["vsat"], -self.par["vsat"]
 
     def stamp(self, s):
@@ -1042,6 +1063,7 @@ class Protection(Part):
         self.heat = 0.0
         self.tripped = False
         self.is_open = False
+        self.peak = 0.0
 
     def current_lines(self):
         return [] if self.is_open else [(a, b, G_CLOSED, 0.0) for a, b in self.poles]
@@ -1058,6 +1080,7 @@ class Protection(Part):
         if self.is_open:
             return
         i = max((mag(G_CLOSED * (v[self.t[a]] - v[self.t[b]])) for a, b in self.poles), default=0.0)
+        self.peak = max(self.peak, i)
         r = i / self._rating()
         if self.INSTANT and r >= self.INSTANT:
             self._trip(f"Tripped at once on {i:.1f} A")
@@ -1073,6 +1096,9 @@ class Protection(Part):
     def is_on(self):
         return not self.is_open
 
+    def poles_now(self):
+        return [(a, b, not self.is_open, True) for a, b in self.poles]
+
     def trace_channels(self):
         return [self._state_channel("closed")]
 
@@ -1080,6 +1106,9 @@ class Protection(Part):
 class Fuse(Protection):
     def status(self, p=None):
         return "Blown" if self.is_open else "OK"
+
+    def badge(self, un):
+        return "BLOWN" if self.is_open else ""
 
     def actions(self):
         return [("reset", "Replace the fuse", False)] if self.is_open else []
@@ -1098,6 +1127,12 @@ class Fuse(Protection):
 class Breaker(Protection):
     I2T = BREAKER_I2T
     INSTANT = 5.0
+
+    def click_command(self):
+        return "toggle"
+
+    def badge(self, un):
+        return "TRIPPED" if self.tripped else ""
 
     def status(self, p=None):
         return "Tripped" if self.tripped else ("Off" if self.is_open else "On")
@@ -1129,6 +1164,7 @@ class Overload(Protection):
         if self.tripped:
             return
         i = max((mag(G_CLOSED * (v[self.t[a]] - v[self.t[b]])) for a, b in self.poles), default=0.0)
+        self.peak = max(self.peak, i)
         r = i / self._rating()
         self.heat = max(0.0, self.heat + (r * r - 1.1) * dt) if r > 1.05 else self.heat * (1.0 - dt / 120.0)
         if self.heat >= self.I2T:
@@ -1138,6 +1174,12 @@ class Overload(Protection):
 
     def status(self, p=None):
         return "Tripped" if self.tripped else "OK"
+
+    def badge(self, un):
+        return "TRIPPED" if self.tripped else ""
+
+    def poles_now(self):
+        return []
 
     def is_on(self):
         return not self.tripped
@@ -1274,6 +1316,12 @@ class Contact(Part):
     def current_lines(self):
         return [(a, b, G_CLOSED, 0.0) for a, b in self.poles] if self.closed() else []
 
+    def poles_now(self):
+        return [(a, b, self.closed(), self.nc) for a, b in self.poles]
+
+    def click_command(self):
+        return "toggle" if self.follows is None and self.reader is None else None
+
     def status(self, p=None):
         return "Closed" if self.closed() else "Open"
 
@@ -1305,6 +1353,9 @@ class Contact(Part):
 class Button(Contact):
     """Held while the mouse is down on it; the Operate button latches it, for keeping it held while looking elsewhere."""
     momentary = True
+
+    def click_command(self):
+        return None
 
     def actions(self):
         return [("toggle", "Release" if self.manual else "Hold", self.manual)]
@@ -1354,6 +1405,10 @@ class Changeover(Contact):
     def closed(self):
         return self.actuated()
 
+    def poles_now(self):
+        on = self.actuated()
+        return [("C", "A", not on, True), ("C", "B", on, False)]
+
     def status(self, p=None):
         return "C to B" if self.actuated() else "C to A"
 
@@ -1379,6 +1434,12 @@ class Rotary(Part):
 
     def current_lines(self):
         return [("C", str(self.position + 1), G_CLOSED, 0.0)]
+
+    def poles_now(self):
+        return [("C", str(i + 1), i == self.position, i == self.START) for i in range(4)]
+
+    def click_command(self):
+        return "toggle"
 
     def status(self, p=None):
         return f"Position {self.position + 1}"
@@ -1432,10 +1493,9 @@ class Prox(Part):
             self.net.dirty = True
 
     def current_lines(self):
-        if not self.powered:
-            return []
+        # its own load is always there: if it went away with the supply, a loose return wire would flip it for ever
         out = [("+", "-", 1.0 / 2400.0, 0.0)]
-        if self.detected:
+        if self.powered and self.detected:
             out.append(("+", "OUT", 1.0 / self.R_OUT, 0.0) if self.pnp else ("OUT", "-", 1.0 / self.R_OUT, 0.0))
         return out
 
@@ -1454,6 +1514,9 @@ class Prox(Part):
 
     def is_on(self):
         return self.powered and self.detected
+
+    def click_command(self):
+        return None if self.reader is not None else "toggle"
 
     def actions(self):
         return [] if self.reader is not None else [("toggle", "Target present", self.manual)]
@@ -1519,10 +1582,10 @@ class AnalogSensor(Part):
         return unit, lo + self.frac * (hi - lo)
 
     def stamp(self, s):
+        plus, minus, out = self.t["+"], self.t["-"], self.t["OUT"]
+        s.line(plus, minus, 1e-3)       # its own load is always there, as for a proximity sensor
         if not self.powered:
             return
-        plus, minus, out = self.t["+"], self.t["-"], self.t["OUT"]
-        s.line(plus, minus, 1e-3)
         unit, value = self._output()
         if unit == "V":
             s.line(out, minus, 1.0 / self.R_OUT, value)
@@ -1549,10 +1612,10 @@ class AnalogSensor(Part):
         return changed
 
     def currents(self, v):
-        if not self.powered:
-            return {}
         plus, minus, out = self.t["+"], self.t["-"], self.t["OUT"]
         own = 1e-3 * (v[plus] - v[minus])
+        if not self.powered:
+            return {"+": own, "-": -own}
         unit, value = self._output()
         if unit == "V":
             i = (value - (v[out] - v[minus])) / self.R_OUT
@@ -1570,10 +1633,13 @@ class AnalogSensor(Part):
 
     def readings(self, p=None):
         unit, value = self._output()
-        out = [("Reads", "percent", 100.0 * self.frac)]
-        if self.powered:
-            out.append(("Output", "voltage" if unit == "V" else "current", value))
-        return out
+        return [("Reads", "percent", 100.0 * self.frac), ("Output", "voltage" if unit == "V" else "current", value if self.powered else 0.0)]
+
+    def badge(self, un):
+        if not self.powered:
+            return "no supply"
+        unit, value = self._output()
+        return un.fmt("voltage" if unit == "V" else "current", value)
 
     def trace_channels(self):
         return [((self.part.key, "out"), f"{self.part.tag} reading", "percent", lambda: 100.0 * self.frac)]
@@ -1636,6 +1702,9 @@ class LoopSensor(Part):
 
     def readings(self, p=None):
         return [("Reads", "percent", 100.0 * self.frac), ("Loop current", "current", self.through())]
+
+    def badge(self, un):
+        return un.fmt("current", self.through()) if self.region == 0 else ("no supply" if self.region < 0 else "loop open")
 
     def trace_channels(self):
         return [((self.part.key, "out"), f"{self.part.tag} reading", "percent", lambda: 100.0 * self.frac)]
@@ -1707,6 +1776,9 @@ class ElectricMotor(Load):
     def status(self, p=None):
         return ("Running, reversed" if self.reversed_now() else "Running") if self.running else "Off"
 
+    def badge(self, un):
+        return un.fmt("current", mag(self.across()) * self.g()) if self.running else ""
+
 
 class Motor3(Part):
     """Three windings in star. Lose a phase while running and it hums on, drawing more, until something protects it;
@@ -1772,6 +1844,9 @@ class Motor3(Part):
         if self.running and not self.lost_phase and sizes[0] > 1.0 and sizes[1] > 1.0:
             self.rev = cmath.phase(complex(ph[0]) / complex(ph[1])) < 0 if isinstance(ph[0], complex) else False
 
+    def badge(self, un):
+        return un.fmt("current", max(mag(i) for i in self.currents(self.net.v).values())) if self.running or self.lost_phase else ""
+
     def status(self, p=None):
         if self.lost_phase:
             return "Running on two phases: overheating" if self.running else "Won't start: a phase is missing"
@@ -1805,6 +1880,9 @@ class MeterV(Part):
     def value(self):
         return signed(self.across())
 
+    def badge(self, un):
+        return un.fmt("voltage", self.value())
+
     def readings(self, p=None):
         return [("Voltage", "voltage", self.value())]
 
@@ -1820,6 +1898,9 @@ class MeterA(Part):
 
     def value(self):
         return signed(self.across() / self.par["ohms"])
+
+    def badge(self, un):
+        return un.fmt("current", self.value())
 
     def readings(self, p=None):
         return [("Current", "current", self.value())]
@@ -1938,6 +2019,9 @@ class OnDelayCoil(Coil):
                 self.is_actuated = True
                 self.net.dirty = True
 
+    def badge(self, un):
+        return un.fmt("time", self.timer) if self.energised and not self.is_actuated else ""
+
     def status(self, p=None):
         if self.energised and not self.is_actuated:
             return "Timing"
@@ -1963,6 +2047,9 @@ class OffDelayCoil(Coil):
                 self.is_actuated = False
                 self.net.dirty = True
 
+    def badge(self, un):
+        return un.fmt("time", self.timer) if self.is_actuated and not self.energised else ""
+
     def status(self, p=None):
         if self.is_actuated and not self.energised:
             return "Timing"
@@ -1984,6 +2071,9 @@ class Relay(Coil):
         if self.is_actuated:
             out = out + [(a, b, G_CLOSED, 0.0) for a, b in self.poles]
         return out
+
+    def poles_now(self):
+        return [(a, b, self.is_actuated, False) for a, b in self.poles]
 
 
 # ---------------------------------------------------------------- the PLC
@@ -2018,6 +2108,8 @@ class Plc(Part):
         self.outs = {a: False for a in self.addr["do"]}
         self.ao_value = {a: 0.0 for a in self.addr["ao"]}
         self.fault_said = ""
+        self.peak = {}
+        self.over_said = set()
         self.rt.reset()
         self.rt.ctx.messages.clear()
         self.rt.running = False
@@ -2037,8 +2129,8 @@ class Plc(Part):
         m = "M"
         out = [(a, m, 1.0 / R_DI, 0.0) for a in self.addr["di"]]
         out += [(a, m, 1.0 / (R_AI_MA if self.ai_ma[a] else R_AI_VOLTS), 0.0) for a in self.addr["ai"]]
+        out.append(("L+", m, self.par["power"] / self._rated() ** 2, 0.0))
         if self.powered:
-            out.append(("L+", m, self.par["power"] / self._rated() ** 2, 0.0))
             for a, on in self.outs.items():
                 if on:
                     if self.do_type == "source":
@@ -2135,6 +2227,27 @@ class Plc(Part):
             self.acc = 0.0
         self._after_scans()
 
+    def output_amps(self, v, a) -> float:
+        """What an output is carrying right now."""
+        if not self.outs.get(a):
+            return 0.0
+        if self.do_type == "source":
+            return mag((v[self.t["L+"]] - v[self.t[a]]) / R_OUTPUT)
+        if self.do_type == "sink":
+            return mag((v[self.t[a]] - v[self.t["M"]]) / R_OUTPUT)
+        return mag((v[self.t["C"]] - v[self.t[a]]) * G_CLOSED)
+
+    def commit(self, v, dt):
+        """An output carrying more than its rating is reported, not modelled: real ones vary in how they fail."""
+        rating = self.par["out_rating"]
+        for a in self.addr["do"]:
+            amps = self.output_amps(v, a)
+            if amps > self.peak.get(a, 0.0):
+                self.peak[a] = amps
+            if rating and amps > rating and a not in self.over_said:
+                self.over_said.add(a)
+                self.net.sim.log(self.part.tag, f"{a} is carrying {amps:.2f} A: more than its {rating:g} A rating")
+
     def _after_scans(self):
         rt = self.rt
         sim = self.net.sim
@@ -2159,6 +2272,15 @@ class Plc(Part):
 
     def is_on(self):
         return self.running()
+
+    def badge(self, un):
+        if not self.rt.ok:
+            return "PROGRAM ERROR"
+        if not self.powered:
+            return "NO SUPPLY"
+        if self.rt.fault:
+            return "FAULT"
+        return "RUN" if self.switch_run else "STOP"
 
     def actions(self):
         if not self.rt.ok:
@@ -2444,6 +2566,8 @@ class Network:
         self._oscillation_said = False
         self._nominal = None
         self.dirty = False
+        for b in self.sensing:      # a switch already made at the start is made in the first solution
+            b.sense(self.sim.dt)
         self._settle()
         self.dirty = True
         for b in self.committing:
@@ -2479,5 +2603,5 @@ class Network:
         out = {}
         for b in self.parts:
             for t, i in b.currents(self.v).items():
-                out[(b.part.sheet, b.part.comp.id, t)] = mag(i) if isinstance(i, complex) else i
+                out[(b.part.sheet, b.part.comp.id, t)] = i
         return out

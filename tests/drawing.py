@@ -7,7 +7,8 @@ from fluidworx.vendor.openschematix.project import new_project
 
 
 class Drawing:
-    """Parts sit far apart on a pattern with no three in line, so a wire's end can only be on the wires that share it."""
+    """Parts sit far apart, and each wire is a short stroke in a place of its own, joined by its two pin references. So
+    nothing can touch by accident however large a circuit gets: the nets are exactly the ones asked for."""
 
     def __init__(self, sheets=1):
         self.project = new_project(title="test", size="A0")
@@ -36,7 +37,8 @@ class Drawing:
         for (a, an), (b, bn) in zip(pins, pins[1:]):
             self.n += 1
             doc = self._doc_of(a)
-            w = Wire(id=self.n, points=[a.terminals()[an], b.terminals()[bn]], start=[a.id, an], end=[b.id, bn])
+            y = 500000 + 20 * self.n
+            w = Wire(id=self.n, points=[(0, y), (10, y)], start=[a.id, an], end=[b.id, bn])
             doc.wires[w.id] = w
 
     def build(self, overrides=None):

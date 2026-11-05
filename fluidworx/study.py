@@ -3,6 +3,8 @@
 A study is a ZIP like a `.schematix`: a mimetype member first, JSON manifest and study data, and a byte-exact
 copy of the schematic it simulates. The schematic stays OpenSchematix's: a study never edits it. Saves are
 written to a temporary file, read back and verified, then renamed over the old file, as OpenSchematix does.
+
+A study is written in the lowest format that holds what it has, so most stay readable by older versions.
 """
 from __future__ import annotations
 
@@ -17,12 +19,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from . import APP_NAME, VERSION
-from .vendor.openschematix import safejson
+from .vendor.openschematix import safejson, simlinks
 
 MIMETYPE = "application/x-fluidworx-study"
 FORMAT_NAME = "FluidWorx Study"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2      # 2 added "links"
 MAX_MEMBER = 200 * 1024 * 1024
+MAX_LINK_TEXT = 200
 
 
 class StudyError(ValueError):
@@ -38,6 +41,7 @@ class Study:
     source_rev: dict = field(default_factory=dict)      # RevisionWorx facts recorded when imported or reloaded
     units: str = "metric"
     params: dict = field(default_factory=dict)          # "uid/id" -> {param: SI value}, user edits only
+    links: dict = field(default_factory=dict)           # "uid/id" -> {property: text}, ties set here and not in the drawing
     notes: str = ""
     created: str = ""
 
@@ -68,7 +72,10 @@ def to_bytes(study: Study) -> bytes:
     doc = {"created": study.created, "units": study.units, "notes": study.notes, "params": study.params,
            "source": {"name": study.source_name, "path": study.source_path, "sha256": study.source_sha256,
                       "revisionworx": study.source_rev}}
-    manifest = {"format": FORMAT_NAME, "version": FORMAT_VERSION, "app": f"{APP_NAME} {VERSION}",
+    links = _clean_links(study.links)
+    if links:
+        doc["links"] = links
+    manifest = {"format": FORMAT_NAME, "version": 2 if links else 1, "app": f"{APP_NAME} {VERSION}",
                 "saved": datetime.now().isoformat(timespec="seconds"), "study": "study.json",
                 "source": "source/schematic" + study.source_ext}
     buf = io.BytesIO()
@@ -99,6 +106,20 @@ def _clean_params(raw) -> dict:
             continue
         good = {k: float(v) for k, v in vals.items() if isinstance(k, str) and isinstance(v, (int, float))
                 and not isinstance(v, bool) and math.isfinite(v)}
+        if good:
+            out[pid] = good
+    return out
+
+
+def _clean_links(raw) -> dict:
+    """Only the properties that are links, as short text. Empty text is kept: it clears what the drawing says."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for pid, vals in raw.items():
+        if not isinstance(pid, str) or not isinstance(vals, dict):
+            continue
+        good = {k: v[:MAX_LINK_TEXT] for k, v in vals.items() if k in simlinks.ALL_KEYS and isinstance(v, str)}
         if good:
             out[pid] = good
     return out
@@ -135,15 +156,16 @@ def from_bytes(data: bytes) -> Study:
                  source_path=str(src.get("path") or ""), source_sha256=sha256(source), source_bytes=source,
                  source_rev=rev if isinstance(rev, dict) else {},
                  units=units if units in ("metric", "us") else "metric",
-                 params=_clean_params(doc.get("params", {})), notes=str(doc.get("notes") or ""),
-                 created=str(doc.get("created") or ""))
+                 params=_clean_params(doc.get("params", {})), links=_clean_links(doc.get("links", {})),
+                 notes=str(doc.get("notes") or ""), created=str(doc.get("created") or ""))
 
 
 def save(study: Study, path: str) -> None:
     """Atomic and verified: an interrupted or failed save leaves the previous file untouched."""
     data = to_bytes(study)
     check = from_bytes(data)
-    if check.source_sha256 != sha256(study.source_bytes) or check.params != _clean_params(study.params):
+    if check.source_sha256 != sha256(study.source_bytes) or check.params != _clean_params(study.params) \
+            or check.links != _clean_links(study.links):
         raise StudyError("The study could not be saved: verification after writing failed.")
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fluidworx-", suffix=".tmp")

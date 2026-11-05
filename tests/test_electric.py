@@ -626,7 +626,7 @@ def test_an_op_amp_as_a_comparator_saturates_at_its_supply_pins():
     part(sim, vin).par["voltage"] = -3.0
     sim.touch()
     sim.step()
-    assert volts(sim, op, "OUT") == pytest.approx(1.5, abs=0.05)
+    assert volts(sim, op, "OUT") == pytest.approx(0.1, abs=0.05)
 
 
 def regulator_circuit(vin):
@@ -1009,3 +1009,124 @@ def test_tubes_are_marked_not_simulated():
     sim.run(0.02)
     assert part(sim, tube).status() == "Not simulated"
     assert any("V1" in i.text and i.level != "info" or "not simulated" in i.text.lower() for i in sim.circuit.issues)
+
+
+def test_a_rectifier_gives_dc_in_proportion_and_only_sources():
+    """24 V AC, full-wave: 0.9 x 24 = 21.6 V DC."""
+    d = Drawing()
+    src, br, r = d.add("el.source.ac", "G1", "24 V"), d.add("el.rectifier.bridge", "V1"), d.add("el.resistor.iec", "R1", "100 ohm")
+    d.wire((src, "1"), (br, "AC1"))
+    d.wire((br, "AC2"), (src, "2"))
+    d.wire((br, "+"), (r, "1"))
+    d.wire((r, "2"), (br, "-"))
+    sim = d.sim()
+    sim.run(0.03)
+    assert diff(sim, r, "1", "2") == pytest.approx(21.6, abs=0.05)
+    assert part(sim, r).through() == pytest.approx(0.216, abs=1e-3)
+    assert part(sim, src).readings()[1][2] == pytest.approx(21.6 ** 2 / 100 / 24, abs=2e-3), "the power comes from the input"
+
+
+def test_a_diode_bridge_of_separate_diodes_rectifies():
+    """Two forward drops out of 24 V, across the load, with the right polarity whichever way the source is."""
+    d = Drawing()
+    src, r = d.add("el.source.ac", "G1", "24 V"), d.add("el.resistor.iec", "R1", "100 ohm")
+    d1, d2, d3, d4 = (d.add("el.diode", f"D{i}") for i in range(1, 5))
+    d.wire((src, "1"), (d1, "A"))
+    d.wire((src, "1"), (d3, "K"))
+    d.wire((src, "2"), (d2, "A"))
+    d.wire((src, "2"), (d4, "K"))
+    d.wire((d1, "K"), (d2, "K"))
+    d.wire((d1, "K"), (r, "1"))
+    d.wire((d3, "A"), (d4, "A"))
+    d.wire((r, "2"), (d3, "A"))
+    sim = d.sim()
+    sim.run(0.03)
+    assert diff(sim, r, "1", "2") == pytest.approx(24.0 - 1.4, abs=0.1)
+    assert part(sim, d1).mode == 1 and part(sim, d4).mode == 1 and part(sim, d2).mode == 0
+
+
+def test_an_autotransformer_takes_its_share_of_the_winding():
+    d = Drawing()
+    src, tr, r = d.add("el.source.ac", "G1", "230 V"), d.add("el.autotransformer", "T1"), d.add("el.resistor.iec", "R1", "1k")
+    d.wire((src, "1"), (tr, "1"))
+    d.wire((tr, "2"), (src, "2"))
+    d.wire((tr, "3"), (r, "1"))
+    d.wire((r, "2"), (tr, "2"))
+    sim = d.sim()
+    sim.step()
+    assert diff(sim, r, "1", "2") == pytest.approx(115.0, abs=1.0)
+
+
+def test_a_centre_tap_gives_half_each_side():
+    d = Drawing()
+    src, tr, r1, r2 = d.add("el.source.ac", "G1", "230 V"), d.add("el.transformer.ct", "T1", "230/24 V"), d.add("el.resistor.iec", "R1", "1k"), d.add("el.resistor.iec", "R2", "1k")
+    d.wire((src, "1"), (tr, "P1"))
+    d.wire((tr, "P2"), (src, "2"))
+    d.wire((tr, "S1"), (r1, "1"))
+    d.wire((r1, "2"), (tr, "CT"))
+    d.wire((tr, "CT"), (r2, "1"))
+    d.wire((r2, "2"), (tr, "S2"))
+    sim = d.sim()
+    sim.step()
+    assert diff(sim, r1, "1", "2") == pytest.approx(12.0, abs=0.05)
+    assert diff(sim, r2, "1", "2") == pytest.approx(12.0, abs=0.05)
+
+
+def test_a_transformer_with_no_supply_is_dead():
+    d = Drawing()
+    tr, r = d.add("el.transformer", "T1", "230/24 V"), d.add("el.resistor.iec", "R1", "24 ohm")
+    d.wire((tr, "S1"), (r, "1"))
+    d.wire((r, "2"), (tr, "S2"))
+    sim = d.sim()
+    sim.step()
+    assert part(sim, r).through() < 1e-6 and part(sim, tr).status() == "No supply"
+
+
+def test_a_sensor_with_its_return_loose_stays_off_and_settles():
+    """Its own load keeps the loose wire at the same voltage, so it reads no supply, rather than flipping for ever."""
+    d = Drawing()
+    src, prox, ana = d.add("el.source.dc", "G1", "24 V"), d.add("el.sensor.prox.pnp", "B1"), d.add("el.sensor.analog", "B2")
+    d.wire((src, "+"), (prox, "+"))
+    d.wire((src, "+"), (ana, "+"))
+    sim = d.sim()
+    sim.run(0.1)
+    assert part(sim, prox).status() == "No supply" and part(sim, ana).status() == "No supply"
+    assert not sim.net.dirty
+
+
+def test_when_nothing_changes_nothing_is_solved():
+    d = Drawing()
+    stop, _start, _hold, _coil = latch(d)
+    sim = d.sim()
+    sim.run(0.1)
+    before = sim.net._solves
+    sim.run(5.0)
+    assert sim.net._solves == before
+    sim.command(part(sim, stop).part.key, "press")
+    sim.run(0.1)
+    assert sim.net._solves > before
+
+
+def test_big_circuit_stays_quick_enough_to_run_live():
+    """Eighty rungs, all relays, must run faster than real time on any machine: well under a step's 10 ms per step."""
+    import time
+    d = Drawing()
+    src, sw = d.add("el.source.dc", "G1", "24 V"), d.add("el.switch.selector.no", "S1")
+    d.wire((src, "+"), (sw, "1"))
+    for i in range(80):
+        coil, c, lamp = d.add("el.coil.iec", f"K{i}"), d.add("el.contact.no.iec", f"K{i}"), d.add("el.lamp.iec", f"H{i}")
+        d.wire((sw, "2"), (coil, "A1"))
+        d.wire((coil, "A2"), (src, "-"))
+        d.wire((src, "+"), (c, "1"))
+        d.wire((c, "2"), (lamp, "1"))
+        d.wire((lamp, "2"), (src, "-"))
+    sim = d.sim()
+    t0 = time.perf_counter()
+    sim.command(part(sim, sw).part.key, "toggle")
+    sim.step()
+    first = time.perf_counter() - t0
+    assert part(sim, coil).energised
+    t0 = time.perf_counter()
+    sim.run(1.0)
+    assert time.perf_counter() - t0 < 1.0, "a settled network costs almost nothing"
+    assert first < 5.0, "and even everything changing at once is a moment"

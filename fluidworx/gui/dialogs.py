@@ -164,6 +164,7 @@ class PreferencesDialog(Dialog):
 class ShortcutsDialog(Dialog):
     ROWS = [("Space", "Play / pause"), ("Ctrl+R", "Reset the simulation"), ("Period (.)", "Step 0.1 s"),
             ("Click a valve", "Operate its left or right side"), ("Double-click a pump", "Start or stop it"),
+            ("Click a switch", "Operate it"), ("Hold the mouse on a push-button", "Press it, until you let go"),
             ("Drag, or middle-drag", "Pan"), ("Wheel, + / -", "Zoom"), ("F", "Zoom to the circuit"),
             ("Ctrl+I", "Import a schematic"), ("Ctrl+O", "Open a study"), ("Ctrl+S", "Save the study"),
             ("Ctrl+E", "Edit in OpenSchematix")]

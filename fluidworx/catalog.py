@@ -245,7 +245,9 @@ PARAMS.update({
     "sensor_analog": _SENSOR_RANGE + [_E("signal", "Output", "choice", 0.0, "What it puts out across its range.",
                                          choices=SENSOR_SIGNALS), _MANUAL],
     "sensor_loop": _SENSOR_RANGE + [_MANUAL],
-    "plc": [_E("supply", "Rated supply", "voltage", 24.0, minimum=1.0), _E("power", "Own consumption", "power", 5.0, minimum=1e-3)],
+    "plc": [_E("supply", "Rated supply", "voltage", 24.0, "It runs from 75% of this, and stops below 60%.", minimum=1.0),
+            _E("power", "Own consumption", "power", 5.0, minimum=1e-3),
+            _E("out_rating", "Output rating", "current", 0.5, "More than this on a digital output is reported in Events. 0 = don't check.")],
     "pressure_contact": [],
 })
 

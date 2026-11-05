@@ -101,6 +101,10 @@ def resolve(parts: list, issues: list, issue_type) -> list:
         for p in by_kind.get(k, []):
             if _fold(p.tag):
                 coils.setdefault(_fold(p.tag), []).append(p)
+    for group in coils.values():
+        if len(group) > 1:
+            issues.append(issue_type("warning", f"{len(group)} coils are tagged {group[0].tag}. Contacts with that tag follow the "
+                                                "first one drawn.", group[1].key))
     out: list = []
     used_coils: set = set()
     if any(p.medium == "el" for p in parts):
@@ -183,6 +187,14 @@ def _contacts(parts, by_kind, coils, used_coils, out, issues, issue_type):
             if target is None:
                 issues.append(issue_type("warning", f"{p.tag} senses {sense.target}, but no cylinder, motor, gauge or "
                                                     "transducer has that tag.", p.key))
+                continue
+            if sense.mode == "value" and p.kind not in ("sensor_analog", "sensor_loop", "pot"):
+                issues.append(issue_type("warning", f"{p.tag} is a switch, so it needs to know where: try {sense.target} 100% or "
+                                                    f"{sense.target} > 50%.", p.key))
+                continue
+            if target.kind == "motor" and sense.quantity != "rpm" and sense.mode != "value":
+                issues.append(issue_type("warning", f"{sense.target} turns without end, so {p.tag} can only read its speed: try "
+                                                    f"{sense.target} > 500 rpm.", p.key))
                 continue
             out.append(Link("sense", target.key, p.key, f"{p.tag} senses {senses}", sense=sense))
             continue
