@@ -267,7 +267,10 @@ class App:
                 ("pneumatic_single_acting.schematix", "Pneumatic single-acting cylinder, 3/2 valve")]
 
     def _rebuild_recent(self):
-        self.recent_menu.delete(0, "end")
+        try:
+            self.recent_menu.delete(0, "end")
+        except tk.TclError:
+            pass        # an empty menu has no "end" index on Tk 9
         for p in self.settings["recent_files"]:
             self.recent_menu.add_command(label=p, command=lambda x=p: self.open_path(x))
         if not self.settings["recent_files"]:
