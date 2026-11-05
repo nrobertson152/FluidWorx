@@ -61,8 +61,15 @@ def test_legacy_osch_and_multisheet_project_from_openschematix():
     sim.run(4.0)
     assert sim.actuators()[0].fraction == 1.0
     d = load(os.path.join(data, "demo_project.schematix"))
-    assert len(d.sheets) == 1 and len(d.skipped_sheets) == 2      # electrical sheets aren't simulated, and say so
-    assert any("24 V supply" in i.text for i in d.issues)
+    assert len(d.sheets) == 3 and not d.skipped_sheets      # hydraulics and its electrical sheets, all of it simulated
+    assert {p.medium for p in d.parts} == {"hyd", "el"}
+    sim = engine.Simulator(d)
+    sim.run(0.05)
+    lamp, coil = next(b for b in sim.parts.values() if b.part.tag == "H2"), next(b for b in sim.parts.values() if b.part.kind == "coil")
+    assert not lamp.is_on() and not coil.energised
+    sim.command(next(b for b in sim.parts.values() if b.part.tag == "S2").part.key, "press")      # start
+    sim.run(0.05)
+    assert lamp.is_on() and coil.energised
 
 
 def test_sheet_connectors_join_a_line_across_sheets():
@@ -94,7 +101,7 @@ def test_sheet_connectors_join_a_line_across_sheets():
 def test_custom_fluid_symbol_is_warned_about_not_guessed():
     from fluidworx import catalog
     assert catalog.classify("user:my-valve").kind == "unsupported"
-    assert catalog.classify("el.coil.iec").kind == "unsupported"
+    assert catalog.classify("el.something.new").kind == "unsupported"
 
 
 def test_study_params_overlay(examples_dir):
@@ -139,3 +146,40 @@ def test_flow_direction_runs_from_pump_to_valve():
 
 
 assert EXAMPLES
+
+
+def _example_paths(name, electric):
+    c = load(name)
+    sim = engine.Simulator(c)
+    return c, sim, FlowPaths(c, electric=electric)
+
+
+def test_current_follows_the_real_path_along_the_wires():
+    """Across each joint on a line, the current is what the parts there take. A lit lamp's wire carries the lamp's current;
+    the wire to an open contact carries nothing."""
+    c, sim, paths = _example_paths("relay_latch.schematix", True)
+    sim.run(0.1)
+    start = next(b for b in sim.parts.values() if b.part.tag == "S1")
+    sim.command(start.part.key, "press")
+    sim.run(0.1)
+    sim.command(start.part.key, "release")
+    sim.run(0.1)
+    flows = paths.compute(sim.net.terminal_currents())
+    lamp = next(b for b in sim.parts.values() if b.part.tag == "H1")
+    assert lamp.is_on()
+    by_wire = {}
+    for i, seg in enumerate(paths.segments):
+        by_wire[seg[1]] = max(by_wire.get(seg[1], 0.0), abs(flows[i]))
+    doc = lamp.part.comp
+    into_lamp = next(w for w in c.project.find_sheet(lamp.part.sheet).wires.values() if w.end and w.end[0] == doc.id)
+    assert by_wire[into_lamp.id] == pytest.approx(lamp.through(), rel=0.02)
+    open_contact = next(b for b in sim.parts.values() if b.part.tag == "K1" and b.part.kind == "contact" and b.nc)
+    out_of_it = next(w for w in c.project.find_sheet(open_contact.part.sheet).wires.values() if w.start and w.start[0] == open_contact.part.comp.id)
+    assert by_wire[out_of_it.id] < 1e-6
+
+
+def test_fluid_paths_are_unchanged_by_an_electrical_sheet():
+    c, sim, paths = _example_paths("plc_cylinder.schematix", False)
+    assert paths.segments and all(c.wire_nodes.get((s[0], s[1])) == s[4] for s in paths.segments)
+    electric_paths = FlowPaths(c, electric=True)
+    assert electric_paths.segments and not ({(s[0], s[1]) for s in paths.segments} & {(s[0], s[1]) for s in electric_paths.segments})

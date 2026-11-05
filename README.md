@@ -4,7 +4,7 @@
   <img src="fluidworx/resources/fluidworx-256.png" alt="FluidWorx logo" width="160">
 </p>
 
-**Free and open-source hydraulic and pneumatic circuit simulator.** Import a circuit you drew in
+**Free and open-source hydraulic, pneumatic and electrical circuit simulator.** Import a circuit you drew in
 [OpenSchematix](https://github.com/nrobertson152/OpenSchematix), press play, and operate it.
 Windows and Linux. Version 0.1.0.
 
@@ -21,14 +21,22 @@ useful you can optionally [support development on Ko-fi](https://ko-fi.com/nr270
 
 - **Opens OpenSchematix circuits as they are.** `.schematix` projects and `.osch` drawings, using OpenSchematix's own
   symbols and connectivity, so nothing is redrawn and lines through sheet connectors stay connected.
-- **A live drawing.** Wires coloured by pressure, flow moving along the real paths, valves that shift, rods that move,
-  and values right on the drawing.
-- **Operate it with the mouse.** Click either side of a valve to work its operator. Start and stop pumps, close shut-off
-  valves and adjust flow controls while it runs.
+- **Fluid and electrical in one simulation.** A 24 V control circuit, a PLC running your program, solenoids, a cylinder,
+  and limit switches and pressure sensors feeding back. **The same tag means the same device**: coil `Y1` is the solenoid
+  of valve `Y1`, contact `S3` belongs to pressure switch `S3`. See [docs/ELECTRICAL.md](docs/ELECTRICAL.md).
+- **Runs PLC programs** written in OpenSchematix in ladder, function blocks, sequential function chart, structured text, C
+  or Python, with the live state of every input, output and variable.
+- **Relay logic and electronics.** Contacts, timers, fuses, breakers, overloads, motors, three-phase starters, power
+  supplies, transformers, diodes, transistors, op-amps and logic gates. The logic is meant to be right; the voltages and
+  currents are good enough to check a design by hand.
+- **A live drawing.** Wires coloured by pressure or voltage, flow and current moving along the real paths, valves that shift,
+  rods that move, contacts that close, coils and lamps that light, and values right on the drawing.
+- **Operate it with the mouse.** Click either side of a valve to work its operator, hold a push-button down, turn a switch.
+  Start and stop pumps, close shut-off valves and adjust flow controls while it runs.
 - **Reads your numbers.** `160 bar`, `10 L/min` and `63/36x300` on the drawing become the simulation's values. Change
   any of them in the Properties panel; the schematic is never touched.
-- **Trace, events and checks.** Plot positions, speeds and pressures, read what happened and when, and see what
-  FluidWorx noticed about the circuit, including anything it can't simulate.
+- **Trace, events and checks.** Plot positions, speeds, pressures, voltages, currents and on/off signals, read what happened
+  and when, and see what FluidWorx noticed about the circuit, including anything it can't simulate.
 - **Metric or US customary**, with OpenSchematix's six themes. It starts in your OpenSchematix theme.
 - **Reports.** A self-contained HTML report with a picture of the circuit, plus trace and event CSV.
 
@@ -72,6 +80,10 @@ To check that a copy works: `python -m fluidworx --self-test`. To see what would
 Blue lines are at tank pressure; red lines are at the highest setting in the circuit. The key is in the corner of the
 drawing, and hovering over a line shows its pressure and flow.
 
+**With an electrical sheet**, give each coil the tag of its valve (`Y1`, or `Y1a` and `Y1b` for two solenoids), and tell each
+position switch what operates it (*Senses*: `A1 100%`). Then hold a push-button down with the mouse, and the two sides run
+together. *File ▸ Open example ▸ PLC running a cylinder* is ready to try: press Start on its Control sheet.
+
 ## Files
 
 | Extension | Contents |
@@ -89,13 +101,15 @@ designs reviewed by a qualified person. In particular:
 
 - Flow is linear with pressure drop, lines have no length, and air is treated as a compressible liquid, so pressures
   and speeds are indicative.
-- Electrical sheets aren't simulated. You operate solenoids by clicking the valve. Limit switches, pressure switches,
-  cams and rollers don't drive anything yet.
-- Intensifiers, servo positioners and custom symbols aren't simulated; their ports are blocked and the Checks panel
-  says so.
+- The electrical side is for logic and rough numbers. AC is carried at its RMS value with no waveforms, relays and contacts
+  act instantly, and fuse and breaker times are indicative. It isn't a protection study, and an E-stop that works here
+  isn't a safety function.
+- Mechanically operated valves (cams and rollers) aren't linked to cylinders. Position switches are.
+- Intensifiers, servo positioners, vacuum tubes and custom symbols aren't simulated; the Checks panel says so.
 - Only tested on Linux so far. CI is set up for Windows, but native Windows use hasn't been checked by hand.
 
-[`docs/MODEL.md`](docs/MODEL.md) has the full model and what each part does.
+[`docs/MODEL.md`](docs/MODEL.md) has the full fluid model and what each part does, and
+[`docs/ELECTRICAL.md`](docs/ELECTRICAL.md) the electrical one.
 
 ## Development
 

@@ -15,7 +15,7 @@ def _load(path):
     if path.lower().endswith(".fluidworx"):
         s = st.load(path)
         project, warn = circuit.load_project_bytes(s.source_bytes, s.source_ext)
-        c = circuit.build(project, warn)
+        c = circuit.build(project, warn, s.links)
         circuit.apply_study_params(c, s.params)
     else:
         project, warn = circuit.load_project(path)
@@ -38,7 +38,13 @@ def check(path) -> int:
     except (CircuitError, StudyError) as e:
         _say(e, err=True)
         return 2
-    _say(f"{len(c.parts)} fluid parts on {len(c.sheets)} sheet(s), {c.node_count - 1} lines.")
+    say = [f"{len(c.fluid_parts)} fluid parts"]
+    if c.electrical_parts:
+        say.append(f"{len(c.electrical_parts)} electrical parts")
+    _say(f"{' and '.join(say)} on {len(c.sheets)} sheet(s), {c.node_count - 1} lines"
+         + (f", {len(c.links)} links." if c.links else "."))
+    for link in c.links:
+        _say(f"link: {link.text}")
     for i in c.issues:
         _say(f"{i.level}: {i.text}")
     return 1 if any(i.level == "error" for i in c.issues) else 0
@@ -64,6 +70,25 @@ def self_test(report) -> int:
         sim.run(5.0)
         act = sim.actuators()[0]
         note(act.fraction == 1.0, "cylinder reached full extension")
+        project, warn = circuit.load_project(os.path.join(os.path.dirname(ex), "plc_cylinder.schematix"))
+        sim = engine.Simulator(circuit.build(project, warn))
+        sim.run(0.2)
+        note(sim.net.plcs and sim.net.plcs[0].status() == "Run", "PLC powered up and running its program")
+        button = next(k for k, b in sim.parts.items() if b.part.tag == "S0")
+        sim.command(button, "press")
+        sim.run(0.1)
+        sim.command(button, "release")
+        act = sim.actuators()[0]
+        sim.run(2.0)
+        note(act.x > 0.01, "PLC output energised a solenoid and the cylinder moved")
+        t, peak = 0.0, 0.0
+        while t < 20.0:
+            sim.run(0.1)
+            t += 0.1
+            peak = max(peak, act.x)
+            if act.x < 0.005 and peak > 0.01:
+                break
+        note(act.x < 0.005 and peak >= act.travel() * 0.9, "a limit switch fed back, and it came back to the start")
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "t.fluidworx")
             s = st.from_source(ex)
@@ -81,7 +106,7 @@ def self_test(report) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="fluidworx", description="Hydraulic and pneumatic circuit simulator")
+    ap = argparse.ArgumentParser(prog="fluidworx", description="Hydraulic, pneumatic and electrical circuit simulator")
     ap.add_argument("file", nargs="?", help=".schematix, .osch or .fluidworx file to open")
     ap.add_argument("--version", "-V", action="store_true", help="show the version")
     ap.add_argument("--check", metavar="FILE", help="report what would be simulated, without a window")

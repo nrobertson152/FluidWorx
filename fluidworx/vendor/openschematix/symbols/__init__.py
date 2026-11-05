@@ -16,7 +16,7 @@ import weakref
 from functools import lru_cache
 
 from .base import Geometry, SymbolDef, Terminal, validate_geometry, LINE_WIDTHS, PORT_TYPES, port_domain  # noqa: F401
-from . import drafting, electrical, electrical_devices, electrical_logic, electrical_passive, electrical_semis, fluid, fluid_conditioning, fluid_cylinders, fluid_flow, fluid_instruments, fluid_lines, fluid_nonreturn, fluid_pressure, fluid_rotary, fluid_storage, general
+from . import drafting, electrical, electrical_control, electrical_devices, electrical_logic, electrical_passive, electrical_semis, fluid, fluid_conditioning, fluid_cylinders, fluid_flow, fluid_instruments, fluid_lines, fluid_nonreturn, fluid_pressure, fluid_rotary, fluid_storage, general
 
 CATEGORY_ORDER = ["Electrical", "Electronic", "Hydraulic", "Pneumatic", "General"]
 
@@ -27,7 +27,7 @@ _OWNER = None                            # weakref to the project whose symbols 
 
 
 def _register_all():
-    for mod in (electrical, electrical_passive, electrical_semis, electrical_devices, electrical_logic, fluid, general, fluid_lines, fluid_storage, fluid_conditioning, fluid_rotary, fluid_cylinders, fluid_pressure, fluid_nonreturn, fluid_flow, fluid_instruments, drafting):
+    for mod in (electrical, electrical_passive, electrical_semis, electrical_devices, electrical_logic, electrical_control, fluid, general, fluid_lines, fluid_storage, fluid_conditioning, fluid_rotary, fluid_cylinders, fluid_pressure, fluid_nonreturn, fluid_flow, fluid_instruments, drafting):
         for sym in mod.symbols():
             if sym.id in _REGISTRY:
                 raise ValueError(f"duplicate symbol id {sym.id}")
@@ -212,5 +212,8 @@ def _geometry_cached(symbol_id: str, params_json: str) -> Geometry:
 def geometry(symbol_id: str, params: dict | None = None) -> Geometry:
     """Return (cached) geometry for a symbol and its parameters. Unknown ids
     resolve to the 'missing symbol' placeholder."""
+    if params and "program" in params:
+        # a PLC's program can be long and doesn't change how the block looks; this is called constantly
+        params = {k: v for k, v in params.items() if k != "program"}
     key = json.dumps(params, sort_keys=True) if params else ""
     return _geometry_cached(symbol_id, key)

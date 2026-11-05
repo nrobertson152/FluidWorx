@@ -24,7 +24,7 @@ from ..vendor.openschematix.gui import theme as th
 from ..vendor.openschematix.gui.widgets import IconButton, ToastHost, ToolbarSeparator, Tooltip, set_current_theme
 from . import icons_extra  # noqa: F401  (registers FluidWorx's icons)
 from .dialogs import AboutDialog, CalderaImportDialog, PreferencesDialog, RevisionDialog, ShortcutsDialog
-from .panels import ChecksPanel, CircuitPanel, EventsPanel, Inspector, TracePanel
+from .panels import ChecksPanel, CircuitPanel, EventsPanel, Inspector, LinksPanel, TracePanel
 from .simcanvas import SimCanvas
 
 FILETYPES_ALL = [("FluidWorx and OpenSchematix files", "*.fluidworx *.schematix *.osch"),
@@ -65,6 +65,7 @@ class App:
         self.circuit = None
         self.sim = None
         self.flowpaths = None
+        self.currentpaths = None
         self.study: study_mod.Study | None = None
         self.study_path: str | None = None
         self.dirty = False
@@ -144,9 +145,11 @@ class App:
         self.trace_panel = TracePanel(self.dock, self)
         self.events_panel = EventsPanel(self.dock, self)
         self.checks_panel = ChecksPanel(self.dock, self)
+        self.links_panel = LinksPanel(self.dock, self)
         self.dock.add(self.trace_panel, text="Trace")
         self.dock.add(self.events_panel, text="Events")
         self.dock.add(self.checks_panel, text="Checks")
+        self.dock.add(self.links_panel, text="Links")
         self.vpane.add(self.dock, weight=2)
         self.right = ttk.Notebook(self.hpane)
         self.inspector = Inspector(self.right, self)
@@ -264,7 +267,11 @@ class App:
                 ("hydraulic_motor.schematix", "Hydraulic motor with meter-out speed control"),
                 ("accumulator_circuit.schematix", "Accumulator charging and unloading"),
                 ("pneumatic_cylinder.schematix", "Pneumatic cylinder, 5/2 valve with speed control"),
-                ("pneumatic_single_acting.schematix", "Pneumatic single-acting cylinder, 3/2 valve")]
+                ("pneumatic_single_acting.schematix", "Pneumatic single-acting cylinder, 3/2 valve"),
+                ("plc_cylinder.schematix", "PLC running a cylinder, with position and pressure feedback"),
+                ("relay_latch.schematix", "Relay logic: start, stop and automatic return"),
+                ("motor_starter_pump.schematix", "Three-phase starter driving a hydraulic pump"),
+                ("electronics_threshold.schematix", "Electronics: a comparator and a transistor switch a relay")]
 
     def _rebuild_recent(self):
         try:
@@ -402,7 +409,7 @@ class App:
         if self.icon_image is not None:
             tk.Label(pad, image=self.icon_image, bg=u["surface"]).pack()
         ttk.Label(pad, text=APP_NAME, style="Title.TLabel").pack(pady=(10, 0))
-        ttk.Label(pad, text="Simulate hydraulic and pneumatic circuits drawn in OpenSchematix.", style="Muted.TLabel").pack(pady=(2, 16))
+        ttk.Label(pad, text="Simulate hydraulic, pneumatic and electrical circuits drawn in OpenSchematix.", style="Muted.TLabel").pack(pady=(2, 16))
         ttk.Button(pad, text="Import an OpenSchematix circuit…", style="Accent.TButton", command=self.import_schematic).pack(fill="x")
         ttk.Button(pad, text="Open a study…", command=self.open_dialog).pack(fill="x", pady=(6, 0))
         ttk.Button(pad, text="Try an example", command=lambda: self.open_path(os.path.join(examples_dir(), "lift_cylinder.schematix"))).pack(fill="x", pady=(6, 0))
@@ -485,9 +492,9 @@ class App:
 
     def _activate(self, st, st_path, keep_view=False):
         project, warnings = circuit_mod.load_project_bytes(st.source_bytes, st.source_ext)
-        c = circuit_mod.build(project, warnings)
+        c = circuit_mod.build(project, warnings, st.links)
         if not c.parts:
-            raise circuit_mod.CircuitError("This file has no hydraulic or pneumatic parts to simulate.")
+            raise circuit_mod.CircuitError("This file has no hydraulic, pneumatic or electrical parts to simulate.")
         circuit_mod.apply_study_params(c, st.params)
         was_sheet = self.doc.uid if keep_view and self.doc is not None else None
         self.running = False
@@ -496,6 +503,7 @@ class App:
         self.circuit = c
         self.sim = engine.Simulator(c)
         self.flowpaths = FlowPaths(c)
+        self.currentpaths = FlowPaths(c, electric=True) if c.electrical_parts else None
         self.selected = None
         self.dirty = False
         if st.units != self.units.system and st_path:
@@ -507,6 +515,7 @@ class App:
         self.events_panel.clear()
         self.trace_panel.rebuild()
         self.checks_panel.rebuild()
+        self.links_panel.rebuild()
         self.show_sheet(was_sheet if was_sheet in c.sheets else c.sheets[0])
         self._update_check_label()
         self._update_title()
@@ -515,8 +524,7 @@ class App:
         if st_path and study_mod.source_changed(st):
             self._show_banner()
         self.refresh_revision_status()
-        n = len(c.parts)
-        self.set_status(f"{n} fluid parts ready. Press Space to run, then click a valve to operate it.")
+        self.set_status(f"{len(c.parts)} parts ready. Press Space to run, then click a valve or a switch to operate it.")
 
     def _confirm_discard(self) -> bool:
         if not self.dirty:
@@ -717,6 +725,30 @@ class App:
         self._refresh_views(force=True)
         self.canvas._draw_legend()
 
+    def set_link(self, key, prop, text):
+        """Tie this part to something, in this study only: the schematic stays as it is. Links decide what the
+        simulation is made of, so it starts again."""
+        pid = study_mod.part_id(key)
+        drawn = self._drawn_prop(key, prop)
+        vals = self.study.links.setdefault(pid, {})
+        if text == drawn:
+            vals.pop(prop, None)
+            if not vals:
+                self.study.links.pop(pid, None)
+        else:
+            vals[prop] = text
+        self._activate(self.study, self.study_path, keep_view=True)
+        self._mark_dirty()
+        self.select(key, reveal=True)
+        self.toast("Link changed. The simulation has started again.")
+
+    def _drawn_prop(self, key, prop) -> str:
+        """What the schematic itself says, without this study's overlay."""
+        project, _warn = circuit_mod.load_project_bytes(self.study.source_bytes, self.study.source_ext)
+        doc = project.find_sheet(key[0])
+        comp = doc.components.get(key[1]) if doc is not None else None
+        return comp.props.get(prop, "").strip() if comp is not None else ""
+
     def reset_part_params(self, key):
         part = self.circuit.part(key)
         if part is None:
@@ -856,6 +888,7 @@ class App:
         self._style_time()
         self._rebuild_tabs()
         self.checks_panel.rebuild()
+        self.links_panel.rebuild()
         self.circuit_panel.rebuild()
         self.trace_panel.rebuild()
         self.inspector.show(self.selected)

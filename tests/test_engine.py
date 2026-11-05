@@ -331,13 +331,14 @@ def test_every_example_runs_a_full_cycle_without_nonsense():
     for f in glob.glob(os.path.join(EXAMPLES, "*.schematix")):
         c, sim = run_example(f)
         assert not [i for i in c.issues if i.level != "info"], f
-        k = next(k for k, b in sim.parts.items() if b.part.kind == "dcv")
+        k = next((k for k, b in sim.parts.items() if b.part.kind == "dcv"), None)
         for side in ("left", "left", "right", "right"):
-            if sim.parts[k].side_can_actuate(side):
+            if k is not None and sim.parts[k].side_can_actuate(side):
                 sim.command(k, side)
             sim.run(3.0)
             assert all(math.isfinite(p) for p in sim.p), f
             assert all(p >= -1.05e5 and p < 1000e5 for p in sim.p), f"{f}: {[round(x / 1e5) for x in sim.p]}"
+            assert all(abs(v) < 1e4 for v in sim.net.v), f"{f}: {sim.net.v}"
 
 
 def test_wires_in_examples_are_orthogonal_and_attached():

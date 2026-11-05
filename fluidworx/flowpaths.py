@@ -3,6 +3,8 @@
 Terminal flows are known from the simulation. Each net is walked as a tree of wire segments from its first
 tank port (the residual has to go somewhere) and the flow in each segment is the sum of what enters below it.
 Sheet connectors with the same label join their net across sheets with a zero-length link.
+
+The same works for current on the electrical nets, where a rail or an earth is what a tank is here.
 """
 from __future__ import annotations
 
@@ -16,28 +18,33 @@ def _pt(uid, p):
 
 
 class FlowPaths:
-    def __init__(self, circuit):
+    def __init__(self, circuit, electric=False):
         self.circuit = circuit
+        self.electric = electric
         self.segments = []      # (sheet uid, wire id, (x0, y0), (x1, y1), node)
         self._plan = {}         # node -> (order[(pt, parent, seg index or None, sign)], {pt: [term refs]})
         self._build()
 
     def _build(self):
         c = self.circuit
+        wire_nodes = c.el_wire_nodes if self.electric else c.wire_nodes
+        term_nodes = c.el_term_nodes if self.electric else c.term_nodes
         by_node_edges: dict = {}
         by_node_terms: dict = {}
         project = c.project
-        fluid_tank = {p.key for p in c.parts if p.kind == "tank"}
+        sink_kinds = ("rail", "ground", "point") if self.electric else ("tank",)
+        fluid_tank = {p.key for p in c.parts if p.kind in sink_kinds}
         tank_terms: dict = {}
         offpage: dict = {}
+        through = [p for p in c.parts if p.kind == "feedthrough"] if self.electric else []
         for doc in project.sheets:
-            wires = [w for w in doc.wires.values() if (doc.uid, w.id) in c.wire_nodes]
+            wires = [w for w in doc.wires.values() if (doc.uid, w.id) in wire_nodes]
             stops: dict = {}
             for w in wires:
-                node = c.wire_nodes[(doc.uid, w.id)]
+                node = wire_nodes[(doc.uid, w.id)]
                 stops.setdefault(node, []).extend([w.points[0], w.points[-1]])
             for w in wires:
-                node = c.wire_nodes[(doc.uid, w.id)]
+                node = wire_nodes[(doc.uid, w.id)]
                 for a, b in zip(w.points, w.points[1:]):
                     on = [q for q in stops[node] if point_on_segment(q, a, b)]
                     on.sort(key=lambda q: (q[0] - a[0]) ** 2 + (q[1] - a[1]) ** 2)
@@ -52,7 +59,7 @@ class FlowPaths:
                 if comp.symbol in OFFPAGE_IDS and link_label(comp):
                     for pos in comp.terminals().values():
                         offpage.setdefault(link_label(comp), []).append(_pt(doc.uid, pos))
-        for ref, node in c.term_nodes.items():
+        for ref, node in term_nodes.items():
             uid, cid, name = ref
             comp = project.find_sheet(uid).components.get(cid)
             if comp is None:
@@ -64,13 +71,17 @@ class FlowPaths:
             by_node_terms.setdefault(node, {}).setdefault(pt, []).append(ref)
             if (uid, cid) in fluid_tank:
                 tank_terms.setdefault(node, pt)
-        for label, pts in offpage.items():
-            for a, b in zip(pts, pts[1:]):
-                for node, edges in by_node_edges.items():
-                    known = {e[0] for e in edges} | {e[1] for e in edges}
-                    if a in known or b in known:
-                        edges.append((a, b, None))
-                        break
+        joins = [(a, b) for pts in offpage.values() for a, b in zip(pts, pts[1:])]
+        for part in through:        # a terminal block: the two wires it joins are one line
+            ends = list(part.comp.terminals().values())[:2]
+            if len(ends) == 2:
+                joins.append((_pt(part.sheet, ends[0]), _pt(part.sheet, ends[1])))
+        for a, b in joins:
+            for node, edges in by_node_edges.items():
+                known = {e[0] for e in edges} | {e[1] for e in edges}
+                if a in known or b in known:
+                    edges.append((a, b, None))
+                    break
         for node, edges in by_node_edges.items():
             adj: dict = {}
             for a, b, idx in edges:

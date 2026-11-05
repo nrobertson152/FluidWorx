@@ -36,6 +36,7 @@ DEFAULTS = {
     "selection_filter": ["component", "wire", "shape"],
     "command_history": [],
     "recent_templates": [],
+    "fluidworx_path": "",           # FluidWorx program; empty = find it automatically
 }
 THEME_MIGRATION = {"light": "modern_light", "dark": "modern_dark"}
 MAX_RECENT = 8

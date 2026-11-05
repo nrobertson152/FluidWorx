@@ -1,5 +1,5 @@
 """Every OpenSchematix fluid symbol must have a deliberate behaviour. A new symbol fails this until classified."""
-from fluidworx import catalog, engine
+from fluidworx import catalog, electric, engine
 from fluidworx.gui_support import cylinder_motion
 from fluidworx.vendor.openschematix import symbols
 
@@ -9,6 +9,68 @@ NOT_SIMULATED_ON_PURPOSE = {"fl.hyd.intensifier", "fl.pneu.intensifier", "fl.hyd
 
 def fluid_symbols():
     return [s for s in symbols.builtin_symbols() if s.id.startswith("fl.") and symbols.geometry(s.id).terminals]
+
+
+def electrical_symbols():
+    return [s for s in symbols.builtin_symbols() if s.id.startswith("el.") and symbols.geometry(s.id).terminals]
+
+
+def test_every_electrical_symbol_is_classified():
+    """Vacuum tubes are left out on purpose, and say so when simulated."""
+    missing = [s.id for s in electrical_symbols() if catalog.classify(s.id).kind == "unsupported"
+               and not catalog.NOT_SIMULATED_ELECTRIC.search(s.id)]
+    assert not missing
+    assert all(catalog.classify(s.id).kind == "unsupported" for s in electrical_symbols() if ".tube." in s.id)
+
+
+def test_every_electrical_kind_has_a_behaviour_and_a_name():
+    kinds = {catalog.classify(s.id).kind for s in electrical_symbols()} - {"unsupported"}
+    assert kinds <= set(electric.BEHAVIOURS)
+    assert kinds <= set(catalog.KIND_NAMES)
+
+
+def test_electrical_and_fluid_kinds_never_share_a_name():
+    """They have different parameters and behaviours, and the fluid side's motor is not the electrical side's."""
+    fluid = {catalog.classify(s.id).kind for s in fluid_symbols()}
+    assert not (fluid & set(electric.BEHAVIOURS)) - {"unsupported"}
+    assert catalog.PARAMS["motor"][0].key == "displacement"
+    assert catalog.KIND_NAMES["motor"] == "Motor" and catalog.KIND_NAMES["rotary"] == "Rotary actuator"
+
+
+def test_the_terminals_each_electrical_kind_uses_exist():
+    needs = {"psu": None, "plc": ("L+", "M"), "coil_on": ("A1", "A2"), "coil_off": ("A1", "A2"), "relay": ("A1", "A2", "13", "14"),
+             "bjt": ("B", "C", "E"), "fet": ("G", "D", "S"), "regulator": ("IN", "OUT", "GND"), "rectifier": ("AC1", "AC2", "+", "-"),
+             "pot": ("1", "2", "3"), "autotransformer": ("1", "2", "3"), "changeover": ("C", "A", "B"),
+             "selector4": ("C", "1", "2", "3", "4"), "prox": ("+", "-", "OUT"), "sensor_analog": ("+", "-", "OUT"),
+             "sensor_loop": ("+", "-"), "opamp": ("+", "-", "OUT"), "transformer": ("P1", "P2")}
+    for s in electrical_symbols():
+        spec = catalog.classify(s.id)
+        names = {t.name for t in symbols.geometry(s.id).terminals}
+        wanted = needs.get(spec.kind) or ()
+        assert set(wanted) <= names, s.id
+        for key in ("poles", "pairs"):
+            for a, b in spec.options.get(key, ()):
+                assert a in names and b in names, s.id
+        for a, b, _k in spec.options.get("windings", ()):
+            assert a in names and b in names, s.id
+        if spec.kind == "psu" or spec.kind == "scr":
+            assert set(spec.options["pins"]) <= names, s.id
+
+
+def test_every_electrical_symbol_can_stand_alone_in_a_running_simulation():
+    from drawing import Drawing
+    d = Drawing()
+    for s in electrical_symbols():
+        d.add(s.id, "T" + str(d.n))
+    sim = d.sim()
+    sim.run(0.05)
+    sim.reset()
+    for b in sim.net.parts:
+        b.status()
+        b.readings()
+        b.actions()
+        b.currents(sim.net.v)
+    assert sim.net.parts
 
 
 def test_every_fluid_symbol_is_classified():

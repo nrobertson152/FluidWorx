@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fluidworx"
 dynamic = ["version"]
-description = "Free and open-source hydraulic and pneumatic circuit simulator for OpenSchematix drawings"
+description = "Free and open-source hydraulic, pneumatic, electrical and PLC circuit simulator for OpenSchematix drawings"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Nate Robertson" }]

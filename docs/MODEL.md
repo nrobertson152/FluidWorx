@@ -4,6 +4,8 @@ FluidWorx shows how a circuit behaves: what shifts, where pressure goes, what mo
 speed. It's a model for understanding and checking logic. **It is not a sizing tool and it doesn't show that a
 circuit is safe.** Use Caldera for sizing.
 
+This page is about the fluid side. The electrical side, the PLC and how they're tied to it are in [ELECTRICAL.md](ELECTRICAL.md).
+
 ## How it works
 
 Each net in the schematic is one node with one pressure. Every 10 ms of simulated time, a linear system is solved
@@ -36,8 +38,8 @@ relief valves, end stops, friction) are re-solved until their state agrees with 
 - **Air is treated as a compressible liquid.** Sequence and logic are right; speeds are rough, and there's no choked
   flow or temperature. Pneumatic flows are actual volume, not free air.
 - **Directional valves switch at once**, with no overlap. Transitions and spool shapes aren't modelled.
-- **Electrical sheets aren't simulated.** Click the valve to operate its solenoid. Limit switches and pressure switches
-  don't drive anything yet, and cams and rollers aren't linked to cylinders.
+- **A solenoid valve with no coil on an electrical sheet** works by clicking it. Mechanically operated valves (cams and
+  rollers) aren't linked to cylinders; position switches are, through their `Senses` property.
 - **Cushions are drawn but not modelled.** Telescopic cylinders are one equivalent bore.
 - **Below about -0.9 bar**, the model supplies fluid to stop the pressure falling further, and logs "cavitation".
 - Parts modelled more simply than this are listed in the Checks panel. Symbols with no model (intensifiers, servo

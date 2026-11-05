@@ -35,6 +35,7 @@ RULES = {
     "symbol": "Unsupported or incomplete symbols",
     "wire-number": "Wire numbers",
     "invalid-wire-ref": "Invalid wire terminal references",
+    "plc": "PLC programs",
 }
 
 
@@ -268,6 +269,18 @@ def check(project, rules=None, require_part_numbers: bool = False) -> list[Issue
                           "Correct if these are separate parts of one device (e.g. a contactor and an auxiliary "
                           "contact block). Otherwise enter the same part number on every symbol of the device, "
                           "or on one symbol only.")
+
+    # ------------------------------------------------ PLC programs
+    if "plc" in rules:
+        from . import plc
+        from .symbols.electrical_control import PLC_ID
+        for doc in project.sheets:
+            for c in doc.components.values():
+                if c.symbol != PLC_ID:
+                    continue
+                for d in plc.check(c.params):
+                    issue(ERROR if d.level == "error" else WARNING, "plc", f"PLC {c.tag()}: {d}", doc.uid, c.id,
+                          (c.x, c.y), "Open the block's program to see it in place.")
 
     # ------------------------------------------------ symbols
     if "symbol" in rules:

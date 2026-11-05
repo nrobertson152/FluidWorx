@@ -1,13 +1,13 @@
-"""The live circuit: the OpenSchematix sheet with wires coloured by pressure, flow beads along the real paths,
-valves that shift, and rods that move."""
+"""The live circuit: the OpenSchematix sheet with wires coloured by pressure or voltage, beads along the real paths,
+valves that shift, rods that move, contacts that close, coils and lamps that light up."""
 from __future__ import annotations
 
 import math
 import tkinter as tk
 
-from .. import engine
+from .. import electric, engine
 from ..gui_support import cylinder_motion
-from ..report import pressure_color
+from ..report import pressure_color, voltage_color
 from ..vendor.openschematix.connectivity import analyse
 from ..vendor.openschematix.geometry import point_on_segment
 from ..vendor.openschematix.gui.canvas_view import DrawingView, draw_items
@@ -17,6 +17,10 @@ from ..vendor.openschematix.symbols.fluid import ENV, HALF, LEAD
 
 BEAD_SPACING = 36.0      # drawing units between flow beads
 PICK_PX = 7
+GLOW = {"lamp": ("#ffe680", "#6b5a14"), "led": ("#ffd0d0", "#6b2a2a"), "emotor": ("#c9efcf", "#21502a"),
+        "emotor3": ("#c9efcf", "#21502a"), "buzzer": ("#ffe680", "#6b5a14")}
+LED_ON = "#22c55e"
+ALARM = "#dc2626"
 
 
 def _prim(p, comp, dx=0.0, color=None):
@@ -49,6 +53,14 @@ class SimCanvas(DrawingView):
         self.valves: dict = {}
         self.cylinders: dict = {}
         self.motors: dict = {}
+        self.switches: dict = {}
+        self.glows: dict = {}
+        self.plcs: dict = {}
+        self.el_items: dict = {}
+        self.el_colors: dict = {}
+        self.el_seg_view: list = []
+        self.el_junctions: dict = {}
+        self._held = None
         self.badges: dict = {}
         self.beads: list = []
         self.seg_view: list = []
@@ -84,8 +96,12 @@ class SimCanvas(DrawingView):
         self.doc = doc
         self.phase.clear()
         self.valves, self.cylinders, self.motors = {}, {}, {}
+        self.switches, self.glows, self.plcs = {}, {}, {}
         self.node_items, self.node_colors, self.badges = {}, {}, {}     # drawn items belong to the old circuit
+        self.el_items, self.el_colors = {}, {}
         self.seg_view = []
+        self.el_seg_view = []
+        self._held = None
         self._ready = False
         if doc is None:
             self.redraw()
@@ -116,14 +132,26 @@ class SimCanvas(DrawingView):
                     self.motors[part.comp.id] = {"b": b}
                 else:
                     self.cylinders[part.comp.id] = {"b": b, "motion": cylinder_motion(part.comp.geometry()), "key": None}
+            elif isinstance(b, electric.Part):
+                if b.poles_now():
+                    self.switches[part.comp.id] = {"b": b, "key": None}
+                if isinstance(b, electric.Plc):
+                    self.plcs[part.comp.id] = {"b": b, "key": None}
+                elif isinstance(b, (electric.Coil, electric.Load, electric.Led, electric.Motor3, electric.Prox)):
+                    self.glows[part.comp.id] = {"b": b, "item": None, "on": None}
         self._index_segments()
         self.junction_nodes = {}
+        self.el_junctions = {}
         for p in analyse(doc).junctions:
             for w in doc.wires.values():
                 if any(point_on_segment(p, a, b) for a, b in zip(w.points, w.points[1:])):
                     node = self.circuit.wire_nodes.get((doc.uid, w.id))
                     if node is not None:
                         self.junction_nodes[(round(p[0], 2), round(p[1], 2))] = node
+                        break
+                    node = self.circuit.el_wire_nodes.get((doc.uid, w.id))
+                    if node is not None:
+                        self.el_junctions[(round(p[0], 2), round(p[1], 2))] = node
                         break
         self._fitted = False
         if fit and self.winfo_width() > 10:
@@ -133,13 +161,17 @@ class SimCanvas(DrawingView):
 
     def _index_segments(self):
         self.seg_view = []
-        if self.app.flowpaths is None or self.doc is None:
+        self.el_seg_view = []
+        if self.doc is None:
             return
-        for i, seg in enumerate(self.app.flowpaths.segments):
-            if seg[0] == self.doc.uid:
-                L = math.hypot(seg[3][0] - seg[2][0], seg[3][1] - seg[2][1])
-                if L > 0.5:
-                    self.seg_view.append((i, seg[2], seg[3], L))
+        for paths, view in ((self.app.flowpaths, self.seg_view), (self.app.currentpaths, self.el_seg_view)):
+            if paths is None:
+                continue
+            for i, seg in enumerate(paths.segments):
+                if seg[0] == self.doc.uid:
+                    L = math.hypot(seg[3][0] - seg[2][0], seg[3][1] - seg[2][1])
+                    if L > 0.5:
+                        view.append((i, seg[2], seg[3], L))
 
     def fit(self, margin=26):
         if self.doc is None:
@@ -178,13 +210,14 @@ class SimCanvas(DrawingView):
         c = self.theme
         self.configure(bg=c["desk"])
         self.node_items, self.node_colors, self.badges, self.beads = {}, {}, {}, []
+        self.el_items, self.el_colors = {}, {}
         if self.doc is None or self.sim is None:
             return
         W, H = self.doc.sheet.size_units()
         x0, y0 = self.to_screen((0, 0))
         x1, y1 = self.to_screen((W, H))
         self.create_rectangle(x0 + 4, y0 + 4, x1 + 4, y1 + 4, fill=c["paper_shadow"], outline="")
-        self.create_rectangle(x0, y0, x1, y1, fill=c["paper"], outline=c["frame"])
+        self.create_rectangle(x0, y0, x1, y1, fill=c["paper"], outline=c["frame"], tags="paper")
         items = scene(self.doc, screen=False, project=self.circuit.project)
         dynamic = set(self.valves) | set(self.cylinders)
         static, wires, junctions = [], [], []
@@ -211,13 +244,35 @@ class SimCanvas(DrawingView):
                                    tags="wire")
             if node is not None:
                 self.node_items.setdefault(node, []).append(cid)
+            else:
+                el = self.circuit.el_wire_nodes.get((self.doc.uid, it["item"]))
+                if el is not None:
+                    self.el_items.setdefault(el, []).append(cid)
         for it in junctions:
             x, y = self.to_screen(it["c"])
             r = max(2.0, it["r"] * self.zoom)
             cid = self.create_oval(x - r, y - r, x + r, y + r, fill=c["wire"], outline="", tags="wire")
-            node = self.junction_nodes.get((round(it["c"][0], 2), round(it["c"][1], 2)))
+            at = (round(it["c"][0], 2), round(it["c"][1], 2))
+            node = self.junction_nodes.get(at)
             if node is not None:
                 self.node_items.setdefault(node, []).append(cid)
+            elif at in self.el_junctions:
+                self.el_items.setdefault(self.el_junctions[at], []).append(cid)
+        for v in self.switches.values():
+            v["key"] = None
+        for v in self.plcs.values():
+            v["key"] = None
+        for cid, v in self.glows.items():
+            comp = self.doc.components.get(cid)
+            b = comp.bbox()
+            x0, y0 = self.to_screen((b[0] - 2, b[1] - 2))
+            x1, y1 = self.to_screen((b[2] + 2, b[3] + 2))
+            kind = v["b"].part.kind
+            colors = GLOW.get(kind)
+            fill = (colors[1] if self._dark() else colors[0]) if colors else self.theme.ui["accent_soft"]
+            v["item"] = self.create_rectangle(x0, y0, x1, y1, fill=fill, outline="", state="hidden", tags="glow")
+            self.tag_raise(v["item"], "paper")
+            v["on"] = None
         for cid, v in self.valves.items():
             v["key"] = None
             v["text"] = valve_text.get(cid, [])
@@ -258,6 +313,15 @@ class SimCanvas(DrawingView):
         pmax = sim.max_pressure()
         x, y, w, h = 14, 14, 150, 8
         self.create_rectangle(x - 8, y - 7, x + w + 8, y + h + 25, fill=u["surface"], outline=u["border"], tags="legend")
+        self._legend_max = pmax
+        if not self.node_items and self.el_items:
+            steps = 30
+            for i in range(steps):
+                col = pressure_color(((i + .5) / steps) ** 2, 1.0, dark)
+                self.create_rectangle(x + w * i / steps, y, x + w * (i + 1) / steps + 1, y + h, fill=col, outline="", tags="legend")
+            self.create_text(x, y + h + 11, text="0 V", anchor="w", fill=u["muted"], font=f["small"], tags="legend")
+            self.create_text(x + w, y + h + 11, text="full voltage", anchor="e", fill=u["muted"], font=f["small"], tags="legend")
+            return
         steps = 30
         for i in range(steps):
             col = pressure_color(pmax * ((i + .5) / steps) ** 2, pmax, dark)
@@ -292,6 +356,7 @@ class SimCanvas(DrawingView):
         self._update_valves(real_dt, pmax, dark)
         self._update_cylinders(pmax, dark)
         self._update_motors()
+        self._update_electric(dark)
         self._update_beads(real_dt)
         self._update_badges()
         self.tag_raise("legend")
@@ -375,6 +440,72 @@ class SimCanvas(DrawingView):
                 prims.append(dict(it, p=(it["p"][0] + bx - ax, it["p"][1] + by - ay), item=None))
             draw_items(self, prims, self.to_screen, self.zoom, self.theme, self.font_family, tag=tag)
 
+    # ---------------------------------------------------------------- the electrical side
+    def _update_electric(self, dark):
+        net = self.sim.net
+        for node, cids in self.el_items.items():
+            col = voltage_color(net, node, dark)
+            if self.el_colors.get(node) != col:
+                self.el_colors[node] = col
+                for cid in cids:
+                    self.itemconfigure(cid, fill=col)
+        for cid, v in self.glows.items():
+            on = bool(v["b"].is_on())
+            if on != v["on"] and v["item"] is not None:
+                v["on"] = on
+                self.itemconfigure(v["item"], state="normal" if on else "hidden")
+        for cid, v in self.switches.items():
+            b = v["b"]
+            poles = b.poles_now()
+            key = tuple((a, z, closed, voltage_color(net, b.t[a], dark) if closed else "") for a, z, closed, _drawn in poles)
+            if key != v["key"]:
+                v["key"] = key
+                self._draw_poles(cid, b, poles, dark)
+        for cid, v in self.plcs.items():
+            b = v["b"]
+            key = tuple(sorted((n, s) for n, s in ((n, b.pin_state(n)) for n in b.names) if s is not None))
+            if key != v["key"]:
+                v["key"] = key
+                self._draw_pins(cid, b)
+
+    def _draw_poles(self, cid, b, poles, dark):
+        """A contact as it is now. A closed pole is a line in the colour of what it carries; a pole drawn closed that
+        has opened gets a gap and a raised blade, so a symbol never looks closed when it isn't."""
+        tag = f"pole{cid}"
+        self.delete(tag)
+        ends = b.part.comp.terminals()
+        width = max(2.0, 2.2 * self.zoom)
+        paper = self.theme["paper"]
+        net = self.sim.net
+        for a, z, closed, drawn_closed in poles:
+            p, q = ends[a], ends[z]
+            x0, y0 = self.to_screen(p)
+            x1, y1 = self.to_screen(q)
+            if closed:
+                self.create_line(x0, y0, x1, y1, fill=voltage_color(net, b.t[a], dark), width=width, capstyle="round", tags=tag)
+            elif drawn_closed:
+                mx0, my0 = x0 + (x1 - x0) * 0.3, y0 + (y1 - y0) * 0.3
+                mx1, my1 = x0 + (x1 - x0) * 0.7, y0 + (y1 - y0) * 0.7
+                self.create_line(mx0, my0, mx1, my1, fill=paper, width=width * 3.5, tags=tag)
+                length = math.hypot(x1 - x0, y1 - y0) or 1.0
+                nx, ny = (y1 - y0) / length, -(x1 - x0) / length
+                lift = 0.25 * length
+                self.create_line(mx0, my0, mx1 + nx * lift, my1 + ny * lift, fill=ALARM, width=width, capstyle="round", tags=tag)
+
+    def _draw_pins(self, cid, b):
+        tag = f"pins{cid}"
+        self.delete(tag)
+        comp = b.part.comp
+        r = max(2.0, 2.4 * self.zoom)
+        inset = {"l": 9, "r": -9}
+        for t in comp.geometry().terminals:
+            state = b.pin_state(t.name)
+            if state is None or t.dir not in inset:
+                continue
+            x, y = self.to_screen(comp.local_to_world(t.x + inset[t.dir], t.y))
+            self.create_oval(x - r, y - r, x + r, y + r, fill=LED_ON if state else self.theme["paper"],
+                             outline=self.theme.ui["border_strong"], tags=tag)
+
     def _update_motors(self):
         self.delete("motordot")
         for v in self.motors.values():
@@ -387,40 +518,44 @@ class SimCanvas(DrawingView):
             self.create_oval(x - r, y - r, x + r, y + r, fill=self.theme["select"], outline="", tags="motordot")
 
     def _update_beads(self, real_dt):
-        fp = self.app.flowpaths
-        if fp is None or not self.app.settings["show_flow"]:
+        if not self.app.settings["show_flow"]:
             self.delete("bead")
             self.beads = []
             return
-        flows = fp.compute(self.sim.terminal_flows())
         r = max(1.6, 1.9 * self.zoom)
         speed_factor = self.app.speed if self.app.running else 0.0
         paper = self.theme["paper"]
         used = 0
         beads = self.beads
-        for i, a, b, L in self.seg_view:
-            q = flows[i]
-            aq = abs(q)
-            if aq < 3e-7:
-                continue
-            ph = self.phase.get(i, 0.0)
-            # bead speed grows with the logarithm of flow, so slow and fast lines can both be read
-            v = (30 + 50 * max(0.0, math.log10(aq / 3e-7))) * speed_factor ** 0.5
-            ph = (ph + (v * real_dt if q > 0 else -v * real_dt)) % BEAD_SPACING
-            self.phase[i] = ph
-            n = int(L / BEAD_SPACING) + 1
-            for k in range(n):
-                s = ph + k * BEAD_SPACING
-                if s > L:
-                    break
-                t = s / L
-                x, y = self.to_screen((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
-                if used < len(beads):
-                    self.coords(beads[used], x - r, y - r, x + r, y + r)
-                    self.itemconfigure(beads[used], state="normal", fill=paper)
-                else:
-                    beads.append(self.create_oval(x - r, y - r, x + r, y + r, fill=paper, outline="", tags="bead"))
-                used += 1
+        lines = []
+        if self.app.flowpaths is not None and self.seg_view:
+            lines.append(("q", self.seg_view, self.app.flowpaths.compute(self.sim.terminal_flows()), 3e-7))
+        if self.app.currentpaths is not None and self.el_seg_view:
+            lines.append(("i", self.el_seg_view, self.app.currentpaths.compute(self.sim.net.terminal_currents()), 1e-3))
+        for family, view, flows, least in lines:
+            for i, a, b, L in view:
+                q = flows[i]
+                aq = abs(q)
+                if aq < least:
+                    continue
+                ph = self.phase.get((family, i), 0.0)
+                # bead speed grows with the logarithm of flow, so slow and fast lines can both be read
+                v = (30 + 50 * max(0.0, math.log10(aq / least))) * speed_factor ** 0.5
+                ph = (ph + (v * real_dt if q.real > 0 else -v * real_dt)) % BEAD_SPACING
+                self.phase[(family, i)] = ph
+                n = int(L / BEAD_SPACING) + 1
+                for k in range(n):
+                    s = ph + k * BEAD_SPACING
+                    if s > L:
+                        break
+                    t = s / L
+                    x, y = self.to_screen((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+                    if used < len(beads):
+                        self.coords(beads[used], x - r, y - r, x + r, y + r)
+                        self.itemconfigure(beads[used], state="normal", fill=paper)
+                    else:
+                        beads.append(self.create_oval(x - r, y - r, x + r, y + r, fill=paper, outline="", tags="bead"))
+                    used += 1
         for cid in beads[used:]:
             self.itemconfigure(cid, state="hidden")
         self.tag_raise("bead")
@@ -435,13 +570,14 @@ class SimCanvas(DrawingView):
             if part.sheet != self.doc.uid:
                 continue
             b = self.sim.parts[part.key]
-            if not self._badge_text(b):
+            live_text = isinstance(b, electric.Part) and type(b).badge is not electric.Part.badge
+            if not self._badge_text(b) and not live_text:
                 if part.kind not in ("relief", "pressure_switch"):
                     continue
             box = part.comp.bbox()
             if part.kind == "gauge":
-                pos, anchor = self.to_screen((box[2] + 5, (box[1] + box[3]) / 2)), "w"
-            elif isinstance(b, engine.Actuator):
+                pos, anchor = self.to_screen((box[2] + 5, box[3] - 2)), "w"     # the part's name is at its upper right
+            elif isinstance(b, engine.Actuator) or isinstance(b, electric.Plc):
                 pos, anchor = self.to_screen(((box[0] + box[2]) / 2, box[1] - 4)), "s"
             else:
                 pos, anchor = self.to_screen((box[0] - 5, (box[1] + box[3]) / 2)), "e"
@@ -452,6 +588,8 @@ class SimCanvas(DrawingView):
     def _badge_text(self, b) -> str:
         un = self.app.units
         p = self.sim.p
+        if isinstance(b, electric.Part):
+            return b.badge(un)
         if isinstance(b, engine.Actuator):
             if b.rotary:
                 return un.fmt("rpm", abs(b.v))
@@ -487,7 +625,7 @@ class SimCanvas(DrawingView):
 
     # ---------------------------------------------------------------- picking and interaction
     def part_at(self, x, y):
-        """The fluid part under a screen point (smallest bounding box wins)."""
+        """The part under a screen point (smallest bounding box wins)."""
         if self.doc is None or self.circuit is None:
             return None
         wx, wy = self.to_world(x, y)
@@ -547,12 +685,30 @@ class SimCanvas(DrawingView):
                 text += f". Click: {action} operator"
             elif isinstance(b, engine.Switched):
                 text += ". Click to switch"
+            elif isinstance(b, electric.Button):
+                action = True
+                text += ". Hold the mouse down to press it"
+            elif isinstance(b, electric.Part) and b.click_command():
+                action = True
+                text += ". Click to operate"
             self.configure(cursor="hand2" if action else "")
             self.app.hover_text(text)
             return
         self.configure(cursor="")
         w = self.wire_at(e.x, e.y)
         if w is not None:
+            el = self.circuit.el_wire_nodes.get((self.doc.uid, w.id))
+            if el is not None:
+                un = self.app.units
+                amps = 0.0
+                cp = self.app.currentpaths
+                if cp is not None:
+                    flows = cp.compute(self.sim.net.terminal_currents())
+                    for i, seg in enumerate(cp.segments):
+                        if seg[0] == self.doc.uid and seg[1] == w.id:
+                            amps = max(amps, abs(flows[i]))
+                self.app.hover_text(f"Line: {un.fmt('voltage', electric.signed(self.sim.net.v[el]))}, {un.fmt('current', amps)}")
+                return
             node = self.circuit.wire_nodes.get((self.doc.uid, w.id))
             if node is not None:
                 un = self.app.units
@@ -569,6 +725,13 @@ class SimCanvas(DrawingView):
 
     def _on_press(self, e):
         self.focus_set()
+        part = self.part_at(e.x, e.y) if self.sim is not None else None
+        if part is not None and isinstance(self.sim.parts[part.key], electric.Button):
+            self._held = part.key       # a push-button stays pressed for as long as the mouse is down on it
+            self.drag = None
+            self.app.select(part.key)
+            self.app.command(part.key, "press")
+            return
         self.drag = (e.x, e.y, self.ox, self.oy, False)
 
     def _on_drag(self, e):
@@ -586,6 +749,11 @@ class SimCanvas(DrawingView):
     def _on_release(self, e):
         drag, self.drag = self.drag, None
         self.configure(cursor="")
+        if self._held is not None:
+            key, self._held = self._held, None
+            if self.sim is not None and key in self.sim.parts:
+                self.app.command(key, "release")
+            return
         if drag and drag[4]:
             self.view_changed()
             return
@@ -602,6 +770,8 @@ class SimCanvas(DrawingView):
                 self.app.command(part.key, act)
         elif isinstance(b, engine.Switched):
             self.app.command(part.key, "toggle")
+        elif isinstance(b, electric.Part) and b.click_command():
+            self.app.command(part.key, b.click_command())
 
     def _on_double(self, e):
         part = self.part_at(e.x, e.y)

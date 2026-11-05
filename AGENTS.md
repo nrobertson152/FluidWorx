@@ -12,7 +12,8 @@ FluidWorx follows the same rules as OpenSchematix.
 - GPL-3.0-or-later, free and open source.
 - Fully offline: no network access, accounts, telemetry, ads or feature limits.
 - Standard library only at runtime. `[dev]` extras are for tests and builds only.
-- The simulation core (`units`, `catalog`, `circuit`, `engine`, `flowpaths`, `study`, `report`) never imports Tkinter.
+- The simulation core (`units`, `catalog`, `circuit`, `links`, `linsolve`, `engine`, `electric`, `flowpaths`, `study`, `report`) never
+  imports Tkinter.
 - Windows and Linux; Python 3.10–3.13; Tk 8.6 and 9.0.
 - A schematic belongs to OpenSchematix: FluidWorx never writes to it. A study keeps its own copy and its own values.
 - `.fluidworx` files must keep opening. Document any format change, version it and test it.
