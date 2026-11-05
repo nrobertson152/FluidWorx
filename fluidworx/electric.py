@@ -2145,6 +2145,7 @@ class Plc(Part):
         self.inputs = {a: False for a in self.addr["di"]}
         self.outs = {a: False for a in self.addr["do"]}
         self.ao_value = {a: 0.0 for a in self.addr["ao"]}
+        self.ao_clamped = set()
         self.fault_said = ""
         self.peak = {}
         self.over_said = set()
@@ -2181,21 +2182,49 @@ class Plc(Part):
                     out.append((a, m, 1.0 / R_AO_VOLTS, self.ao_value[a]))
         return out
 
+    def _ao_top(self, v):
+        """How far a current output can push: its supply, less 2 V."""
+        return max(self._supply(v) - 2.0, 0.0)
+
+    def _ao_amps(self, a, v) -> float:
+        if a in self.ao_clamped:
+            return self._ao_top(v) - (v[self.t[a]] - v[self.t["M"]])
+        return self.ao_value[a] / 1000.0
+
     def stamp(self, s):
         super().stamp(s)
         if self.powered:
             for a in self.addr["ao"]:
                 if self.ao_ma[a]:
-                    # a current out, as far as the supply can push it
-                    s.line(self.t[a], self.t["M"], 1e-5)
-                    s.source(self.t["M"], self.t[a], self.ao_value[a] / 1000.0)
+                    if a in self.ao_clamped:
+                        s.line(self.t[a], self.t["M"], 1.0, self._ao_top(self.net.v))
+                    else:
+                        s.source(self.t["M"], self.t[a], self.ao_value[a] / 1000.0)
+
+    def update(self, v):
+        """A current output into a high resistance, or nothing at all, stops at what its supply allows."""
+        if not self.powered:
+            return False
+        changed = False
+        for a in self.addr["ao"]:
+            if self.ao_ma[a]:
+                top = self._ao_top(v)
+                room = (v[self.t[a]] - v[self.t["M"]]).real
+                if a in self.ao_clamped:
+                    if top - room > self.ao_value[a] / 1000.0:
+                        self.ao_clamped.discard(a)
+                        changed = True
+                elif room > top + 1e-3:
+                    self.ao_clamped.add(a)
+                    changed = True
+        return changed
 
     def currents(self, v):
         out = super().currents(v)
         if self.powered:
             for a in self.addr["ao"]:
                 if self.ao_ma[a]:
-                    i = self.ao_value[a] / 1000.0
+                    i = self._ao_amps(a, v)
                     out[a] = out.get(a, 0.0) - i
                     out["M"] = out.get("M", 0.0) + i
         return out

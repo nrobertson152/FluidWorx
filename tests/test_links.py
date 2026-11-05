@@ -1114,6 +1114,43 @@ def test_analog_output_commands_a_proportional_valve():
     assert part(sim, valve).opening() == pytest.approx(25.0, abs=0.5)
 
 
+def current_output_rig(load):
+    params = plc_params(pous=[{"name": "Main", "lang": "st", "source": "AO0 := 50.0;"}], vars=[])
+    params["program"]["io"] = {"AO0": {"signal": "4-20mA", "lo": 0, "hi": 100}}
+    params["tags"] = {}
+    d = Drawing()
+    src, plc_ = d.add("el.source.dc", "G1", "24 V"), d.add("el.plc", "PLC1", params=params)
+    d.wire((src, "+"), (plc_, "L+"))
+    d.wire((src, "-"), (plc_, "M"))
+    r = None
+    if load:
+        r = d.add("el.resistor.iec", "R1", load)
+        d.wire((plc_, "AO0"), (r, "1"))
+        d.wire((r, "2"), (src, "-"))
+    return d, plc_, r
+
+
+def test_a_current_output_drives_its_current_through_a_load():
+    """Half of 4-20 mA is 12 mA, or 3 V across 250 ohm."""
+    d, _plc, r = current_output_rig("250 ohm")
+    sim = d.sim()
+    sim.run(0.1)
+    assert part(sim, r).through() == pytest.approx(12e-3, abs=1e-5)
+    assert diff(sim, r, "1", "2") == pytest.approx(3.0, abs=2e-3)
+
+
+def test_a_current_output_stops_at_what_its_supply_can_push():
+    """12 mA through 10k would be 120 V. It has 24 V, less 2 V. With nothing on the pin at all, the same."""
+    d, plc_, r = current_output_rig("10k")
+    sim = d.sim()
+    sim.run(0.1)
+    assert diff(sim, r, "1", "2") == pytest.approx(22.0, abs=0.05)
+    d, plc_, _r = current_output_rig(None)
+    sim = d.sim()
+    sim.run(0.1)
+    assert diff(sim, plc_, "AO0", "M") == pytest.approx(22.0, abs=0.05)
+
+
 def test_plc_messages_and_scan_time():
     source = "count = 0\ndef loop():\n    global count\n    count += 1\n    if count == 5:\n        print('five')\n"
     params = plc_params(pous=[{"name": "Main", "lang": "python", "source": source}], vars=[], scan_ms=20)
