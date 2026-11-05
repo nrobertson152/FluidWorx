@@ -47,12 +47,29 @@ def find(tool: str, settings=None) -> list | None:
     return None
 
 
+def child_environment(environ=None, frozen=None) -> dict:
+    """Environment for another program. A packaged FluidWorx points these at its own libraries, which would break
+    a different program that inherited them."""
+    env = dict(os.environ if environ is None else environ)
+    if getattr(sys, "frozen", False) if frozen is None else frozen:
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        for key in ("TCL_LIBRARY", "TK_LIBRARY", "TKPATH"):
+            env.pop(key, None)
+        original = env.pop("LD_LIBRARY_PATH_ORIG", None)
+        if original is not None:
+            env["LD_LIBRARY_PATH"] = original
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
 def launch(tool: str, args=(), settings=None) -> bool:
     """Start a tool and leave it running. Returns False if it isn't installed."""
     cmd = find(tool, settings)
     if cmd is None:
         return False
-    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+          "env": child_environment()}
     if sys.platform.startswith("win"):
         kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:

@@ -1,0 +1,83 @@
+# Builds the Windows and Linux packages and keeps them as workflow artifacts. Publishing a release and pushing
+# version tags are for the Director; this workflow does neither.
+name: Build packages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (tar.gz + AppImage)
+    runs-on: ubuntu-22.04     # an older glibc, so the build runs on more systems
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-venv xvfb libfuse2
+      - name: Set up build environment
+        run: |
+          python3 -m venv .build-venv --system-site-packages
+          .build-venv/bin/python -m pip install --upgrade pip pyinstaller
+      - name: Build bundle and tar.gz
+        run: PATH="$PWD/.build-venv/bin:$PATH" packaging/build_linux.sh
+      - name: Packaged check (bundle)
+        run: xvfb-run -a python3 packaging/packaged_smoke.py dist/FluidWorx/FluidWorx fluidworx/examples/lift_cylinder.schematix
+      - name: Build AppImage
+        run: PATH="$PWD/.build-venv/bin:$PATH" packaging/build_appimage.sh
+      - name: Packaged check (AppImage)
+        run: |
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          xvfb-run -a python3 packaging/packaged_smoke.py "$(ls dist/FluidWorx-*-x86_64.AppImage)" fluidworx/examples/lift_cylinder.schematix
+      - name: Checksums
+        run: cd dist && sha256sum FluidWorx-*.tar.gz FluidWorx-*.AppImage > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluidWorx-linux
+          path: |
+            dist/FluidWorx-*.tar.gz
+            dist/FluidWorx-*.AppImage
+            dist/SHA256SUMS-linux.txt
+          if-no-files-found: error
+
+  windows:
+    name: Windows (installer + portable zip)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up build environment
+        run: python -m pip install pyinstaller
+      - name: Build bundle
+        run: python -m PyInstaller packaging\fluidworx.spec --noconfirm --clean --distpath dist --workpath build
+      - name: Packaged check
+        run: python packaging\packaged_smoke.py dist\FluidWorx\FluidWorx.exe fluidworx\examples\lift_cylinder.schematix
+      - name: Build installer and portable zip
+        shell: pwsh
+        run: |
+          $v = python -c "import fluidworx; print(fluidworx.VERSION)"
+          Copy-Item LICENSE dist\FluidWorx\
+          Compress-Archive -Force -Path dist\FluidWorx -DestinationPath "dist\FluidWorx-$v-windows-x64-portable.zip"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler unavailable: $iscc" }
+          & $iscc "/DMyAppVersion=$v" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-ChildItem dist -Filter "FluidWorx-*" -File | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content dist\SHA256SUMS-windows.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluidWorx-windows
+          path: |
+            dist/FluidWorx-*.zip
+            dist/FluidWorx-*.exe
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error

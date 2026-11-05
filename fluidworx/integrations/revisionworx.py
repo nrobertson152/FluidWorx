@@ -8,11 +8,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 
 from . import tools
 
 TIMEOUT = 30
+# a windowed Windows build must not flash a console for each command
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform.startswith("win") else {}
 
 
 class RevisionWorxError(RuntimeError):
@@ -70,7 +73,8 @@ class Client:
                                     "Set its location in Preferences.")
         try:
             r = subprocess.run([*self.cmd, "--json", "-w", self.workspace, *args], capture_output=True, text=True,
-                               timeout=TIMEOUT, check=False, encoding="utf-8", errors="replace")
+                               timeout=TIMEOUT, check=False, encoding="utf-8", errors="replace",
+                               env=tools.child_environment(), stdin=subprocess.DEVNULL, **_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise RevisionWorxError(f"RevisionWorx could not be run: {e}") from e
         if r.returncode != 0:
