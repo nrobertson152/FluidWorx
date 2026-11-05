@@ -2,7 +2,7 @@
   "project": "OpenSchematix",
   "url": "https://github.com/nrobertson152/OpenSchematix",
   "version": "1.2.0",
-  "commit": "0d7f94c96f93a94a1d344b28f038a97dbf5e938f",
+  "commit": "f2aedac2638aa5b924f502bb7c8845986a3b738c",
   "license": "GPL-3.0-or-later",
   "note": "Copied unchanged by tools/sync_openschematix.py. Do not edit; change OpenSchematix and re-sync."
 }

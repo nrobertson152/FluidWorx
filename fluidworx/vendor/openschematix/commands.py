@@ -89,6 +89,7 @@ COMMANDS = [
     CommandDef("TERMINALS", ("TS",), "Terminal strip report", "TERMINALS", "Reports"),
     CommandDef("WIRENUMBER", ("WN",), "Assign wire numbers", "WIRENUMBER [renumber]", "Reports"),
     CommandDef("CHECK", ("CHK",), "Check the drawing", "CHECK", "Reports"),
+    CommandDef("SIMULATE", ("SIM",), "Simulate the saved project in FluidWorx", "SIMULATE", "Reports"),
     CommandDef("EXPORT", ("EXP",), "Export", "EXPORT PDF | SVG | DXF | BOM | WIRELIST", "File"),
     CommandDef("IMPORT", ("IMP",), "Import a DXF drawing", "IMPORT DXF", "File"),
     CommandDef("FIT", (), "Fit the drawing to the sheet (sets the print scale)", "FIT", "Sheet"),

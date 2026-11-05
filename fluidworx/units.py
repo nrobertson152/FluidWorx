@@ -26,6 +26,14 @@ QUANTITIES = {
     "percent": {"metric": ("%", 1.0), "us": ("%", 1.0)},
     "ratio": {"metric": (":1", 1.0), "us": (":1", 1.0)},
     "time": {"metric": ("s", 1.0), "us": ("s", 1.0)},
+    "voltage": {"metric": ("V", 1.0), "us": ("V", 1.0)},
+    "current": {"metric": ("A", 1.0), "us": ("A", 1.0)},
+    "resistance": {"metric": ("Ω", 1.0), "us": ("Ω", 1.0)},
+    "capacitance": {"metric": ("µF", 1e-6), "us": ("µF", 1e-6)},
+    "inductance": {"metric": ("mH", 1e-3), "us": ("mH", 1e-3)},
+    "power": {"metric": ("W", 1.0), "us": ("W", 1.0)},
+    "state": {"metric": ("on/off", 1.0), "us": ("on/off", 1.0)},
+    "number": {"metric": ("", 1.0), "us": ("", 1.0)},
 }
 
 # text units accepted when reading schematic labels and typed values, in SI per unit
@@ -40,7 +48,16 @@ TEXT_UNITS = {
     "volume": {"l": 1e-3, "ml": 1e-6, "gal": 3.785412e-3, "cc": 1e-6},
     "displacement": {"cc/rev": 1e-6, "cc": 1e-6, "cm3/rev": 1e-6, "in3/rev": 1.638706e-5},
     "torque": {"nm": 1.0, "n·m": 1.0, "n.m": 1.0, "lbft": 1.355818, "lb·ft": 1.355818, "ft-lb": 1.355818},
+    "voltage": {"v": 1.0, "vdc": 1.0, "vac": 1.0, "volt": 1.0, "volts": 1.0, "mv": 1e-3, "kv": 1e3},
+    "current": {"a": 1.0, "amp": 1.0, "amps": 1.0, "ma": 1e-3, "ua": 1e-6, "µa": 1e-6},
+    "resistance": {"ω": 1.0, "ohm": 1.0, "ohms": 1.0, "r": 1.0, "k": 1e3, "kω": 1e3, "kohm": 1e3, "m": 1e6, "mω": 1e6,
+                   "mohm": 1e6, "meg": 1e6},
+    "capacitance": {"f": 1.0, "mf": 1e-3, "uf": 1e-6, "µf": 1e-6, "nf": 1e-9, "pf": 1e-12},
+    "inductance": {"h": 1.0, "mh": 1e-3, "uh": 1e-6, "µh": 1e-6},
+    "power": {"w": 1.0, "kw": 1e3, "mw": 1e-3, "hp": 745.7, "va": 1.0, "kva": 1e3},
+    "time": {"s": 1.0, "sec": 1.0, "ms": 1e-3, "min": 60.0, "h": 3600.0},
 }
+ENGINEERING = {"voltage": "V", "current": "A", "power": "W"}     # shown with a prefix when small: 20 mA, not 0.02 A
 
 
 class Units:
@@ -61,6 +78,14 @@ class Units:
         return _trim(self.from_si(q, v))
 
     def fmt(self, q: str, v: float) -> str:
+        if q == "state":
+            return "on" if v else "off"
+        if q == "number":
+            return _trim(v)
+        if q in ENGINEERING and 5e-7 <= abs(v) < 1:
+            return f"{_trim(v * 1000)} m{ENGINEERING[q]}"
+        if q == "resistance" and abs(v) >= 1000:
+            return f"{_trim(v / 1e6)} MΩ" if abs(v) >= 1e6 else f"{_trim(v / 1e3)} kΩ"
         unit = self.label(q)
         sep = "" if unit in ("%", "°", ":1") else " "
         return f"{self.number(q, v)}{sep}{unit}"
@@ -118,20 +143,52 @@ def parse_number(text: str) -> float:
 
 
 _VALUE_UNIT = re.compile(r"^\s*(.*?)\s*([A-Za-zµ°/\"·.³²0-9-]*[A-Za-z\"³²])\s*$")
+_STUCK_UNIT = re.compile(r"^\s*(.*?[\d)])\s*([A-Za-zµΩω°/\"·³²]+)\s*$")
 
 
 def parse_entry(text: str, quantity: str, units: Units) -> float:
     """SI value of what the user typed: a bare number is in the display unit; "160 bar" names its own."""
     s = str(text).strip()
-    m = _VALUE_UNIT.match(s)
-    if m and m.group(1) and quantity in TEXT_UNITS:
-        factor = TEXT_UNITS[quantity].get(m.group(2).lower())
-        if factor is not None:
-            return parse_number(m.group(1)) * factor
+    for pattern in (_VALUE_UNIT, _STUCK_UNIT):       # "160 bar", and "4.7k" or "24V" with no space
+        m = pattern.match(s)
+        if m and m.group(1) and quantity in TEXT_UNITS:
+            factor = TEXT_UNITS[quantity].get(m.group(2).lower())
+            if factor is not None:
+                return parse_number(m.group(1)) * factor
     return units.to_si(quantity, parse_number(s))
 
 
 _NUM = r"(\d+(?:[.,]\d+)?)"
+_RKM = re.compile(r"^\s*(\d+)([RrKkMm])(\d+)\s*(?:Ω|ohms?)?\s*$")
+
+
+def find_resistance(text: str) -> float | None:
+    """A resistor's value as drawings write it: 4.7k, 4k7, 220R, 1M, 10 kΩ, 470 ohm, or a bare 470."""
+    if not text:
+        return None
+    for word in re.split(r"[,;]\s*|\s{2,}", text.strip()):
+        m = _RKM.match(word)
+        if m:
+            factor = {"r": 1.0, "k": 1e3, "m": 1e6}[m.group(2).lower()]
+            return float(f"{m.group(1)}.{m.group(3)}") * factor
+    v = find_quantity(text, "resistance")
+    if v is not None:
+        return v
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*$", text)
+    return float(m.group(1)) if m else None
+
+
+def find_range(text: str, quantity: str):
+    """(low, high) from text such as "0-250 bar", "4-20 mA" or "0 to 10 V", in SI; None if there is none."""
+    if not text or quantity not in TEXT_UNITS:
+        return None
+    names = sorted(TEXT_UNITS[quantity], key=len, reverse=True)
+    pat = r"(-?\d+(?:\.\d+)?)\s*(?:-|–|\.\.|to)\s*(-?\d+(?:\.\d+)?)\s*(" + "|".join(re.escape(n) for n in names) + r")(?![A-Za-z/])"
+    m = re.search(pat, text, re.IGNORECASE)
+    if not m:
+        return None
+    f = TEXT_UNITS[quantity][m.group(3).lower()]
+    return float(m.group(1)) * f, float(m.group(2)) * f
 
 
 def find_quantity(text: str, quantity: str) -> float | None:

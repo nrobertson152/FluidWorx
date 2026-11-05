@@ -933,7 +933,7 @@ class SchematicCanvas(DrawingView):
                 c = self.doc.components[hit]
                 sd = symbols.get(c.symbol)
                 if sd is not None and sd.parametric:
-                    self.app.configure_valve(hit)
+                    self.app.configure_symbol(hit)
                 else:
                     self.app.focus_properties()
             elif hit in self.doc.shapes and self.doc.shapes[hit].kind == "text":

@@ -1,4 +1,4 @@
-"""The simulation: a lumped pressure/flow network solved step by step.
+"""The simulation: a lumped pressure/flow network solved step by step, alongside the electrical one (electric.py).
 
 Each net is one node with a pressure and a small compliance. Valves are conductances that open and close,
 actuators add a velocity unknown and a force balance, and each time step (backward Euler) is a linear system
@@ -14,6 +14,8 @@ from __future__ import annotations
 import math
 
 from .circuit import Circuit, Part
+from .electric import BEHAVIOURS as ELECTRIC_BEHAVIOURS, Network
+from .linsolve import System, solve
 from .vendor.openschematix.symbols.fluid import LAYOUTS, PATTERNS, VALVE_TYPES, normal_position
 
 ATM = 101325.0
@@ -48,116 +50,6 @@ MEDIUM = {
 def throttle_g(g_pass: float, opening_pct: float) -> float:
     """Cubic so the useful range is spread across the control: 100% = an open valve."""
     return g_pass * (max(0.0, min(100.0, opening_pct)) / 100.0) ** 3
-
-
-# ---------------------------------------------------------------- linear system
-class System:
-    """Equations: for each free node, sum of outflows + C/dt (p - p_old) = injection; one row per moving actuator."""
-
-    def __init__(self, sim: "Simulator"):
-        self.idx = sim.idx
-        self.rows = [dict() for _ in range(sim.n_free)]
-        self.rhs = [0.0] * sim.n_free
-
-    def add_var(self) -> int:
-        self.rows.append({})
-        self.rhs.append(0.0)
-        return len(self.rows) - 1
-
-    def _a(self, r, c, v):
-        row = self.rows[r]
-        row[c] = row.get(c, 0.0) + v
-
-    def line(self, a, b, g, e=0.0):
-        """Q(a->b) = g (pa - pb - e)."""
-        ia, ib = self.idx[a], self.idx[b]
-        if ia is not None:
-            self._a(ia, ia, g)
-            if ib is not None:
-                self._a(ia, ib, -g)
-            self.rhs[ia] += g * e
-        if ib is not None:
-            self._a(ib, ib, g)
-            if ia is not None:
-                self._a(ib, ia, -g)
-            self.rhs[ib] -= g * e
-
-    def source(self, a, b, q):
-        """Q(a->b) = q, whatever the pressures."""
-        ia, ib = self.idx[a], self.idx[b]
-        if ia is not None:
-            self.rhs[ia] -= q
-        if ib is not None:
-            self.rhs[ib] += q
-
-    def inlet_held(self, a, b, g, pset):
-        """Q(a->b) = g (pa - pset): flow set by the inlet alone, whatever the outlet does."""
-        ia, ib = self.idx[a], self.idx[b]
-        if ia is not None:
-            self._a(ia, ia, g)
-            self.rhs[ia] += g * pset
-            if ib is not None:
-                self._a(ib, ia, -g)
-        if ib is not None:
-            self.rhs[ib] -= g * pset
-
-    def regulated(self, a, b, g, pset):
-        """Q(a->b) = g (pset - pb): a pressure regulator's flow, set by its outlet alone."""
-        ia, ib = self.idx[a], self.idx[b]
-        if ib is not None:
-            self._a(ib, ib, g)
-            self.rhs[ib] += g * pset
-            if ia is not None:
-                self._a(ia, ib, -g)
-        if ia is not None:
-            self.rhs[ia] -= g * pset
-
-
-def solve(rows: list, rhs: list, scale: list) -> list:
-    """Sparse Gaussian elimination with partial pivoting. `scale` = column scaling (pressures in bar, say)."""
-    n = len(rows)
-    work = []
-    b = []
-    for row, r in zip(rows, rhs):
-        scaled = {j: a * scale[j] for j, a in row.items() if a != 0.0}
-        m = max((abs(a) for a in scaled.values()), default=1.0) or 1.0
-        work.append({j: a / m for j, a in scaled.items()})
-        b.append(r / m)
-    for k in range(n):
-        best, best_v = None, 0.0
-        for i in range(k, n):
-            v = abs(work[i].get(k, 0.0))
-            if v > best_v:
-                best, best_v = i, v
-        if best is None or best_v < 1e-14:
-            work[k] = {k: 1.0}      # a free-floating unknown: pin it rather than fail
-            b[k] = 0.0
-            continue
-        if best != k:
-            work[k], work[best] = work[best], work[k]
-            b[k], b[best] = b[best], b[k]
-        pivot_row = work[k]
-        piv = pivot_row[k]
-        for i in range(k + 1, n):
-            ri = work[i]
-            f = ri.get(k)
-            if f is None:
-                continue
-            f = f / piv
-            del ri[k]
-            for j, a in pivot_row.items():
-                if j != k:
-                    ri[j] = ri.get(j, 0.0) - f * a
-            b[i] -= f * b[k]
-    x = [0.0] * n
-    for k in range(n - 1, -1, -1):
-        s = b[k]
-        row = work[k]
-        for j, a in row.items():
-            if j != k:
-                s -= a * x[j]
-        x[k] = s / row[k]
-    return [v * c for v, c in zip(x, scale)]
 
 
 # ---------------------------------------------------------------- building blocks
@@ -293,6 +185,7 @@ class Pump(Behaviour):
     def __init__(self, sim, part):
         super().__init__(sim, part)
         self.running = True
+        self.driven_by = None           # the electric motor that turns it, if the drawing says so
         self.reversed = False
         self.mode = "full"
         self.compensated = part.kind in ("pump_pc", "compressor")
@@ -351,10 +244,18 @@ class Pump(Behaviour):
     def reset(self):
         self.mode = "full"
         self.fault = False
+        if self.driven_by is not None:
+            self.running = False
+
+    def set_driven(self, running):
+        """Its motor started or stopped."""
+        if running != self.running:
+            self.running = running
+            self.sim.touch()
 
     def status(self, p):
         if not self.running:
-            return "Stopped"
+            return "Stopped" if self.driven_by is None else f"Stopped: {self.driven_by} is off"
         if self.fault:
             return "Blocked: pressure limit reached"
         if self.compensated and self.mode != "full":
@@ -365,13 +266,13 @@ class Pump(Behaviour):
         return [("Delivery", "flow", self.q(p)), ("Pressure", "pressure", self._dp(p))]
 
     def actions(self):
-        acts = [("toggle", "Stop" if self.running else "Start", self.running)]
+        acts = [] if self.driven_by is not None else [("toggle", "Stop" if self.running else "Start", self.running)]
         if self.part.spec.options.get("bidir"):
             acts.append(("reverse", "Reverse direction", self.reversed))
         return acts
 
     def command(self, name):
-        if name == "toggle":
+        if name == "toggle" and self.driven_by is None:
             self.running = not self.running
             return True
         if name == "reverse":
@@ -388,15 +289,31 @@ class Relief(Behaviour):
         self.seat = Seat(self.node(0), self.node(1), self.names[0], self.names[1], self.m["g_relief"])
         self.seats = [self.seat]
         self.vented = False
+        self.signal = None              # a proportional solenoid's share of the setting, when it has a coil
         self.interactive = bool(part.spec.options.get("vent"))
 
+    def _crack(self):
+        if self.vented:
+            return 0.0
+        setting = self.part.params["setting"]
+        return setting if self.signal is None else setting * self.signal
+
     def stamp(self, s):
-        self.seat.crack = 0.0 if self.vented else self.part.params["setting"]
+        self.seat.crack = self._crack()
         super().stamp(s)
 
     def update(self, p):
-        self.seat.crack = 0.0 if self.vented else self.part.params["setting"]
+        self.seat.crack = self._crack()
         return super().update(p)
+
+    def set_energised(self, side, on, fraction=1.0):
+        if self.part.spec.options.get("vent"):
+            if self.vented != on:
+                self.vented = on
+                self.sim.touch()
+        elif self.signal != fraction:
+            self.signal = fraction
+            self.sim.touch()
 
     def status(self, p):
         if self.seat.q(p) > FLOW_EPS:
@@ -657,16 +574,19 @@ class Shuttle(Behaviour):
 
 
 class Throttle(Behaviour):
+    def opening(self):
+        return self.part.params["opening"]
+
     def stamp(self, s):
-        self.lines = [(self.names[0], self.names[1], throttle_g(self.m["g_pass"], self.part.params["opening"]))]
+        self.lines = [(self.names[0], self.names[1], throttle_g(self.m["g_pass"], self.opening()))]
         super().stamp(s)
 
     def flows(self, p):
-        self.lines = [(self.names[0], self.names[1], throttle_g(self.m["g_pass"], self.part.params["opening"]))]
+        self.lines = [(self.names[0], self.names[1], throttle_g(self.m["g_pass"], self.opening()))]
         return super().flows(p)
 
     def status(self, p):
-        return "Closed" if self.part.params["opening"] <= 0 else "Throttling"
+        return "Closed" if self.opening() <= 0 else "Throttling"
 
     def readings(self, p):
         q = abs(self.flows(p).get(self.names[0], 0.0))
@@ -790,6 +710,13 @@ class Switched(Behaviour):
             return True
         return False
 
+    def set_energised(self, side, on, fraction=1.0):
+        want = 1 if on else 0
+        if want != self.state:
+            self.state = want
+            self._configure()
+            self.sim.touch()
+
     def reset(self):
         self.state = self.initial
         self._configure()
@@ -799,9 +726,19 @@ class Switched(Behaviour):
 
 class Prop(Throttle):
     interactive = True
+    signal = None           # opening from its coil, 0..100, when it has one
+
+    def opening(self):
+        return self.part.params["opening"] if self.signal is None else self.signal
+
+    def set_energised(self, side, on, fraction=1.0):
+        value = 100.0 * fraction if on else 0.0
+        if self.signal != value:
+            self.signal = value
+            self.sim.touch()
 
     def status(self, p):
-        return "Closed" if self.part.params["opening"] <= 0 else f"Open {self.part.params['opening']:.0f}%"
+        return "Closed" if self.opening() <= 0 else f"Open {self.opening():.0f}%"
 
 
 _SPECIALS = {"both": [(0, 1)], "tandem": [(2, 3)], "float": [(0, 3), (1, 3)], "open": [(0, 2), (1, 2), (2, 3)],
@@ -835,6 +772,8 @@ class Valve(Behaviour):
         self.normal = normal_position(self.npos, self.left, self.right)
         self.position = self.normal
         self.cmd = {"left": False, "right": False}
+        self.sol = {"left": False, "right": False}      # energised by a coil on the electrical sheet
+        self.wired = set()                              # sides that have such a coil
         geom = part.comp.geometry()
         ports = set(self.layout)
         self.pilot_terms = {"left": [], "right": []}
@@ -861,9 +800,15 @@ class Valve(Behaviour):
         ops = self.left if side == "left" else self.right
         return any(o not in _MANUAL_OPS_EXCLUDED for o in ops)
 
+    def set_energised(self, side, on, fraction=1.0):
+        if self.sol.get(side) != on:
+            self.sol[side] = on
+            self._apply()
+            self.sim.touch()
+
     def target_position(self):
-        left = self.cmd["left"] or self.pilot_active["left"]
-        right = self.cmd["right"] or self.pilot_active["right"]
+        left = self.cmd["left"] or self.pilot_active["left"] or self.sol["left"]
+        right = self.cmd["right"] or self.pilot_active["right"] or self.sol["right"]
         if self.npos == 3:
             if left and not right:
                 return 0
@@ -894,6 +839,7 @@ class Valve(Behaviour):
     def reset(self):
         self.position = self.normal
         self.cmd = {"left": False, "right": False}
+        self.sol = {"left": False, "right": False}
         self.pilot_active = {"left": False, "right": False}
         self._configure()
 
@@ -914,6 +860,8 @@ class Valve(Behaviour):
                 ops = self.left if side == "left" else self.right
                 op = next((o for o in ops if o not in _MANUAL_OPS_EXCLUDED), "")
                 label = {"solenoid": "solenoid", "lever": "lever", "pilot": "pilot"}.get(op, "operator")
+                if side in self.wired:
+                    label += ", manual override"
                 out.append((side, f"{word} {label}", self.cmd[side]))
         return out
 
@@ -1194,6 +1142,7 @@ BEHAVIOURS = {
     "plug": Inert, "gauge": Gauge, "pressure_switch": PressureSwitch, "passage": Passage, "nozzle": Nozzle,
     "unsupported": Inert,
 }
+BEHAVIOURS.update(ELECTRIC_BEHAVIOURS)
 
 
 # ---------------------------------------------------------------- simulator
@@ -1211,7 +1160,10 @@ class Simulator:
                 n += 1
         self.n_free = n
         self.base_c = [MEDIUM[circuit.node_medium.get(i, "hyd")]["c_line"] for i in range(circuit.node_count)]
-        self.parts = {p.key: BEHAVIOURS[p.kind](self, p) for p in circuit.parts}
+        self.fluid = {p.key: BEHAVIOURS[p.kind](self, p) for p in circuit.parts if p.medium != "el"}
+        self.parts = dict(self.fluid)
+        self.net = Network(self, circuit)
+        self.parts.update(self.net.by_key)
         self.cavitation = []        # seats that stop a node going below vacuum
         seen = set()
         for b in self.parts.values():
@@ -1240,6 +1192,7 @@ class Simulator:
             b.reset()
         for seat, *_ in self.cavitation:
             seat.open = False
+        self.net.restart()
         self._idle = False
         self._last_status = {k: b.status(self.p) for k, b in self.parts.items()}
         self._pending = {}
@@ -1249,6 +1202,7 @@ class Simulator:
     def touch(self):
         """Something changed from outside (a command or a parameter): the circuit is no longer settled."""
         self._idle = False
+        self.net.touch()
 
     def command(self, key, name) -> bool:
         b = self.parts.get(tuple(key))
@@ -1272,7 +1226,7 @@ class Simulator:
             k = c / self.dt
             s.rows[i][i] = s.rows[i].get(i, 0.0) + k
             s.rhs[i] += k * p_old[node]
-        for b in self.parts.values():
+        for b in self.fluid.values():
             b.stamp(s)
         for seat, _n, _t in self.cavitation:
             seat.stamp(s)
@@ -1287,22 +1241,25 @@ class Simulator:
         return p, x
 
     def step(self):
-        """Advance one time step."""
+        """Advance one time step: first the electrical side and any PLC, then the fluid they operate."""
+        self.net.step(self.dt)
         if self._idle:
             self.time += self.dt
+            if self.net.changed or self._pending:
+                self._note_changes()
             return
         p_old = self.p
         caps = {}
-        for b in self.parts.values():
+        for b in self.fluid.values():
             for n, c in b.extra_capacitance(p_old).items():
                 if self.idx[n] is not None:
                     caps[n] = caps.get(n, 0.0) + c
-        was_moving = any(b.v != 0.0 for b in self.parts.values() if isinstance(b, Actuator))
+        was_moving = any(b.v != 0.0 for b in self.fluid.values() if isinstance(b, Actuator))
         p = p_old
         for _ in range(16):
             p, self.x_vars = self._solve_once(p_old, caps)
             changed = False
-            for b in self.parts.values():
+            for b in self.fluid.values():
                 changed |= bool(b.update(p))
             for seat, _n, _t in self.cavitation:
                 changed |= seat.update(p)
@@ -1310,14 +1267,14 @@ class Simulator:
                 break
         self.p = p
         moving = False
-        for b in self.parts.values():
+        for b in self.fluid.values():
             b.commit(p, self.dt)
             if isinstance(b, Actuator) and b.v != 0.0:
                 moving = True
         self.time += self.dt
         self._note_changes()
         settled = not moving and not was_moving and all(abs(a - c) < 20.0 for a, c in zip(p, p_old))
-        self._idle = settled and all(b.dir == 0 for b in self.parts.values() if isinstance(b, Actuator))
+        self._idle = settled and all(b.dir == 0 for b in self.fluid.values() if isinstance(b, Actuator))
 
     def run(self, seconds: float):
         steps = max(1, int(round(seconds / self.dt)))
@@ -1338,7 +1295,7 @@ class Simulator:
             elif self.time - cand[1] >= 0.05:
                 self._last_status[k] = st
                 self._pending.pop(k, None)
-                if st and b.part.kind not in ("passage",):
+                if st and b.part.kind not in ("passage",) and not getattr(b, "quiet", False):
                     self.log(b.part.tag, st)
         for seat, node, tag in self.cavitation:
             was = getattr(seat, "open", False)
@@ -1358,7 +1315,7 @@ class Simulator:
     def terminal_flows(self) -> dict:
         """(sheet uid, comp id, terminal) -> signed flow into the component."""
         out = {}
-        for b in self.parts.values():
+        for b in self.fluid.values():
             for t, q in b.flows(self.p).items():
                 out[(b.part.sheet, b.part.comp.id, t)] = q
         return out
@@ -1380,6 +1337,8 @@ class Simulator:
 
 
 def _command_text(b, name) -> str:
+    if hasattr(b, "command_text"):
+        return b.command_text(name)
     if isinstance(b, Valve):
         word = "left" if name == "left" else "right"
         return f"{word.capitalize()} operator {'on' if b.cmd.get(name) else 'off'}"
@@ -1421,6 +1380,8 @@ class Trace:
             elif isinstance(b, Pump):
                 self.channels.append(((part.key, "p"), f"{part.tag} pressure", "pressure",
                                       lambda bb=b: bb._dp(sim.p)))
+            elif hasattr(b, "trace_channels"):
+                self.channels += b.trace_channels()
         self.times = []
         self.data = [[] for _ in self.channels]
         self._next = 0.0
