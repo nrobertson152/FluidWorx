@@ -5,8 +5,9 @@ import tkinter as tk
 from tkinter import ttk
 
 from .. import catalog, electric, engine, units as units_mod
-from ..vendor.openschematix import simlinks
+from ..vendor.openschematix import plc as plc_core, simlinks
 from ..vendor.openschematix.gui import theme as th
+from ..vendor.openschematix.gui.plc_view import ProgramView
 from ..vendor.openschematix.gui.widgets import IconButton, PanelHeader, ScrollFrame, Section, Tooltip
 
 GROUPS = [("Supply", ("pump", "pump_pc", "compressor")),
@@ -212,6 +213,7 @@ class Inspector(ScrollFrame):
         if not b.rt.ok:
             for d in b.rt.program.errors[:6]:
                 sec.add_full(ttk.Label(sec.body, text=str(d), style="Warning.TLabel", wraplength=250, justify="left"))
+        sec.add_full(ttk.Button(sec.body, text="Show the program running", command=lambda: self.app.show_program(b.part.key)), pady=(4, 0))
         sec.add_full(ttk.Label(sec.body, text="Edit the program in OpenSchematix: select the block, then Program PLC.",
                                style="Faint.TLabel", wraplength=250, justify="left"), pady=(4, 0))
 
@@ -676,6 +678,95 @@ class LinksPanel(ttk.Frame):
         sel = self.tree.selection()
         if sel and self._map.get(sel[0]):
             self.app.select(self._map[sel[0]], reveal=True)
+
+
+class ProgramPanel(ttk.Frame):
+    """A PLC's program as it runs: rungs lit as far as the power really went, blocks by their signals, charts by their active steps."""
+
+    def __init__(self, master, app):
+        super().__init__(master, style="Surface.TFrame")
+        self.app = app
+        self.plcs = []
+        bar = ttk.Frame(self, style="Surface.TFrame", padding=(8, 6))
+        bar.pack(fill="x")
+        self.plc_var, self.pou_var = tk.StringVar(), tk.StringVar()
+        self.plc_box = ttk.Combobox(bar, textvariable=self.plc_var, state="readonly", width=14)
+        self.plc_box.pack(side="left")
+        self.plc_box.bind("<<ComboboxSelected>>", lambda e: self.pick_plc(self.plc_box.current()))
+        self.pou_box = ttk.Combobox(bar, textvariable=self.pou_var, state="readonly", width=26)
+        self.pou_box.pack(side="left", padx=(6, 0))
+        self.pou_box.bind("<<ComboboxSelected>>", lambda e: self.pick_pou(self.pou_box.current()))
+        self.state = ttk.Label(bar, text="", style="Bold.TLabel")
+        self.state.pack(side="left", padx=(12, 0))
+        panes = ttk.PanedWindow(self, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        self.view = ProgramView(panes, lambda: self.app.theme, self._is_running)
+        panes.add(self.view, weight=3)
+        side = ttk.Frame(panes, style="Surface.TFrame")
+        panes.add(side, weight=1)
+        self.watch = ttk.Treeview(side, columns=("name", "value"), show="headings", selectmode="none")
+        self.watch.heading("name", text="Name", anchor="w")
+        self.watch.heading("value", text="Value", anchor="w")
+        self.watch.column("name", width=120, stretch=True)
+        self.watch.column("value", width=70, stretch=True)
+        self.watch.pack(side="left", fill="both", expand=True)
+        _scroll(side, self.watch).pack(side="right", fill="y")
+        self._rows = {}
+        self.current = None
+        self.pous = []
+
+    def rebuild(self):
+        """Whatever the simulation now is. No PLC: the tab goes away."""
+        sim = self.app.sim
+        self.plcs = list(sim.net.plcs) if sim is not None else []
+        if not self.plcs:
+            self.current = None
+            self.view.show(None, None)
+            return
+        self.plc_box.configure(values=[b.part.tag for b in self.plcs])
+        self.pick_plc(0)
+
+    def pick_plc(self, index):
+        if not 0 <= index < len(self.plcs):
+            return
+        self.current = self.plcs[index]
+        self.plc_box.current(index)
+        self.pous = [p for p in plc_core.program_of(self.current.part.comp.params or {})["pous"] if isinstance(p, dict)]
+        self.pou_box.configure(values=[f"{p.get('name')} ({plc_core.LANGUAGES.get(p.get('lang'), p.get('lang'))})" for p in self.pous])
+        self.watch.delete(*self.watch.get_children())
+        self._rows = {}
+        self.pick_pou(0)
+
+    def show_plc(self, key):
+        for i, b in enumerate(self.plcs):
+            if b.part.key == tuple(key):
+                self.pick_plc(i)
+
+    def pick_pou(self, index):
+        if not 0 <= index < len(self.pous):
+            self.view.show(None, None)
+            return
+        self.pou_box.current(index)
+        self.view.show(self.current.rt, self.pous[index])
+        self.refresh()
+
+    def _is_running(self):
+        return self.current is not None and self.current.running()
+
+    def refresh(self):
+        b = self.current
+        if b is None:
+            return
+        self.view.refresh()
+        self.state.configure(text=b.status())
+        for name, tag, value in b.watch():
+            label = f"{name} {tag}".strip()
+            shown = Inspector._show_value(value)
+            iid = self._rows.get(name)
+            if iid is None:
+                self._rows[name] = self.watch.insert("", "end", values=(label, shown))
+            elif self.watch.set(iid, "value") != shown:
+                self.watch.set(iid, "value", shown)
 
 
 class FaultsPanel(ttk.Frame):

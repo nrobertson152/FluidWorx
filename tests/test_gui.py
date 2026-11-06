@@ -572,3 +572,51 @@ def test_every_inspector_with_a_fault_list_opens(app):
     app.set_fault(plc, "stop")
     pump(app)
     assert "Failed: CPU stopped" in app.inspector.status_var.get()
+
+
+def test_the_program_tab_follows_the_plc(app):
+    open_ex(app, "plc_cylinder.schematix")
+    panel = app.program_panel
+    assert app.dock.tab(panel, "state") == "normal"
+    plc = app.sim.net.plcs[0]
+    app.show_program(plc.part.key)
+    pump(app)
+    assert app.dock.select() == str(panel) and panel.current is plc
+    assert panel.state.cget("text") in ("Run", "No supply")
+    app.sim.run(0.3)
+    app._refresh_views(force=True)
+    pump(app)
+    assert plc.running() and panel.state.cget("text") == "Run"
+    assert panel.view.cv.find_all(), "something is drawn"
+    names = [panel.watch.set(i, "name") for i in panel.watch.get_children()]
+    assert any(n.startswith("I0") for n in names)
+    hot = "#1a8f3c" if "success" not in app.theme.ui else app.theme.ui["success"]
+
+    def lit():
+        cv = panel.view.cv
+        return [i for i in cv.find_all() if cv.type(i) == "line" and cv.itemcget(i, "fill") == hot]
+    if panel.pous[0].get("lang") == "ld":
+        assert lit(), "a live rung has power on it"
+        app.set_fault(plc.part.key, "stop")
+        app._refresh_views(force=True)
+        pump(app)
+        panel.refresh()
+        assert not lit(), "a stopped PLC has none"
+        app.set_fault(plc.part.key, None)
+
+
+def test_the_program_tab_goes_away_with_no_plc(app):
+    open_ex(app, "plc_cylinder.schematix")
+    assert app.dock.tab(app.program_panel, "state") == "normal"
+    open_ex(app, "lift_cylinder.schematix")
+    assert app.dock.tab(app.program_panel, "state") == "hidden"
+    assert app.program_panel.current is None
+
+
+def test_the_properties_panel_opens_the_program(app):
+    open_ex(app, "plc_cylinder.schematix")
+    key = app.sim.net.plcs[0].part.key
+    app.select(key, reveal=True)
+    pump(app)
+    app.show_program(key)
+    assert app.dock.select() == str(app.program_panel)
