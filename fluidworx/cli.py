@@ -50,6 +50,34 @@ def check(path) -> int:
     return 1 if any(i.level == "error" for i in c.issues) else 0
 
 
+def run_tests(path) -> int:
+    """The test scenarios in a study, with no window. 0 if they all pass, 1 if any fail, 2 if there's nothing to run."""
+    from . import circuit, engine, scenario, study as st
+    from .units import Units
+    try:
+        s = st.load(path)
+        if not s.scenarios:
+            _say(f"{os.path.basename(path)} has no test scenarios.", err=True)
+            return 2
+        failed = 0
+        for test in s.scenarios:
+            project, warn = circuit.load_project_bytes(s.source_bytes, s.source_ext)
+            c = circuit.build(project, warn, s.links)
+            circuit.apply_study_params(c, s.params)
+            result = scenario.Runner(engine.Simulator(c), test, Units(s.units)).run()
+            _say(f"{'pass' if result.passed else 'FAIL'}  {result.name}  ({result.time:.2f} s)")
+            for row in result.failures:
+                _say(f"      {row.text}: {row.detail}")
+            for _t, first, other in result.races:
+                _say(f"      note: {first} and {other} raced, so this is only one of the answers")
+            failed += not result.passed
+    except (st.StudyError, circuit.CircuitError) as e:
+        _say(e, err=True)
+        return 2
+    _say(f"{len(s.scenarios) - failed} of {len(s.scenarios)} passed. This shows what the model does: it isn't a test of a real machine.")
+    return 1 if failed else 0
+
+
 def self_test(report) -> int:
     """Create a circuit, simulate it and check the result: a one-command proof that an install works."""
     from . import circuit, engine, study as st
@@ -110,6 +138,7 @@ def main(argv=None) -> int:
     ap.add_argument("file", nargs="?", help=".schematix, .osch or .fluidworx file to open")
     ap.add_argument("--version", "-V", action="store_true", help="show the version")
     ap.add_argument("--check", metavar="FILE", help="report what would be simulated, without a window")
+    ap.add_argument("--test", metavar="FILE", help="run the test scenarios in a study, without a window")
     ap.add_argument("--self-test", nargs="?", const="", metavar="REPORT", help="check this install works")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
     if args.version:
@@ -117,6 +146,8 @@ def main(argv=None) -> int:
         return 0
     if args.check:
         return check(args.check)
+    if args.test:
+        return run_tests(args.test)
     if args.self_test is not None:
         return self_test(args.self_test)
     try:

@@ -1,4 +1,4 @@
-# The `.fluidworx` study format (version 2)
+# The `.fluidworx` study format (version 3)
 
 A study is a ZIP archive laid out like an OpenSchematix `.schematix`. Text members are UTF-8 JSON. Readers ignore
 members they don't know.
@@ -20,7 +20,7 @@ source/schematic.*    byte-exact copy of the schematic (.schematix or .osch)
 A reader refuses a higher `version` and asks the user to update; it never guesses.
 
 A study is written in the lowest version that holds what it has, so most stay readable by older FluidWorx. Version 2
-added `links`, and a study has `"version": 2` only if it has some.
+added `links`, and a study has `"version": 2` only if it has some. Version 3 added `scenarios`, and a study has `"version": 3` only if it has some.
 
 `study.json`:
 
@@ -37,6 +37,11 @@ added `links`, and a study has `"version": 2` only if it has some.
 - `links` (version 2, optional) holds ties set in the study and not in the drawing, as component properties laid over the
   study's copy of the schematic: `{"<sheet uid>/<component id>": {"Senses": "A1 100%"}}`. The properties are `Senses`,
   `Solenoid a`, `Solenoid b` and `Driven by`. Empty text clears what the drawing says. Anything else in it is ignored.
+- `scenarios` (version 3, optional) holds test scenarios: `[{"name": "Normal cycle", "steps": [...]}]`. A step is one of
+  `{"do": "wait", "seconds": 0.5}`, `{"do": "command", "part": "<uid>/<id>", "tag": "S1", "command": "press"}`,
+  `{"do": "check", "part": ..., "tag": "Y1", "status": "Energised"}`, `{"do": "check", ..., "reading": "Position", "quantity": "length", "at_least": 0.19, "at_most": 0.21}`,
+  `{"do": "wait_for", ..., "timeout": 10.0}` with either kind of expectation, `{"do": "fault", "part": ..., "tag": "S2", "fault": "stuck_open"}` with `null` to put it right, and
+  `{"do": "line", "line": "<uid>/<wire id>", "tag": "K1 13 to Y1 A1", "failed": true}`. Readings are SI. Anything else in it is ignored.
 - `source.path` is only a hint, used to notice that the original has changed. The study always runs from its own copy.
 - `source.sha256` must match the embedded copy, or the study is rejected as damaged.
 - Non-finite numbers are rejected, as OpenSchematix's readers do.

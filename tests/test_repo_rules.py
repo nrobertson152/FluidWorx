@@ -7,7 +7,7 @@ import pathlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PKG = ROOT / "fluidworx"
 CORE = ["__init__", "units", "catalog", "circuit", "engine", "electric", "links", "linsolve", "flowpaths", "study", "report",
-        "settings", "cli"]
+        "scenario", "settings", "cli"]
 FORBIDDEN_NETWORK = {"socket", "http", "urllib", "requests", "ftplib", "smtplib", "ssl"}
 
 

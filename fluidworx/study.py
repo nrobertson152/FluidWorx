@@ -18,12 +18,12 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from . import APP_NAME, VERSION
+from . import APP_NAME, VERSION, scenario
 from .vendor.openschematix import safejson, simlinks
 
 MIMETYPE = "application/x-fluidworx-study"
 FORMAT_NAME = "FluidWorx Study"
-FORMAT_VERSION = 2      # 2 added "links"
+FORMAT_VERSION = 3      # 2 added "links", 3 added "scenarios"
 MAX_MEMBER = 200 * 1024 * 1024
 MAX_LINK_TEXT = 200
 
@@ -42,6 +42,7 @@ class Study:
     units: str = "metric"
     params: dict = field(default_factory=dict)          # "uid/id" -> {param: SI value}, user edits only
     links: dict = field(default_factory=dict)           # "uid/id" -> {property: text}, ties set here and not in the drawing
+    scenarios: list = field(default_factory=list)       # test scenarios, as in scenario.py
     notes: str = ""
     created: str = ""
 
@@ -75,7 +76,10 @@ def to_bytes(study: Study) -> bytes:
     links = _clean_links(study.links)
     if links:
         doc["links"] = links
-    manifest = {"format": FORMAT_NAME, "version": 2 if links else 1, "app": f"{APP_NAME} {VERSION}",
+    tests = scenario.clean(study.scenarios)
+    if tests:
+        doc["scenarios"] = tests
+    manifest = {"format": FORMAT_NAME, "version": 3 if tests else 2 if links else 1, "app": f"{APP_NAME} {VERSION}",
                 "saved": datetime.now().isoformat(timespec="seconds"), "study": "study.json",
                 "source": "source/schematic" + study.source_ext}
     buf = io.BytesIO()
@@ -157,6 +161,7 @@ def from_bytes(data: bytes) -> Study:
                  source_rev=rev if isinstance(rev, dict) else {},
                  units=units if units in ("metric", "us") else "metric",
                  params=_clean_params(doc.get("params", {})), links=_clean_links(doc.get("links", {})),
+                 scenarios=scenario.clean(doc.get("scenarios", [])),
                  notes=str(doc.get("notes") or ""), created=str(doc.get("created") or ""))
 
 
@@ -165,7 +170,7 @@ def save(study: Study, path: str) -> None:
     data = to_bytes(study)
     check = from_bytes(data)
     if check.source_sha256 != sha256(study.source_bytes) or check.params != _clean_params(study.params) \
-            or check.links != _clean_links(study.links):
+            or check.links != _clean_links(study.links) or check.scenarios != scenario.clean(study.scenarios):
         raise StudyError("The study could not be saved: verification after writing failed.")
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fluidworx-", suffix=".tmp")

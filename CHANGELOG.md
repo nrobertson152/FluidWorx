@@ -28,6 +28,7 @@ First version.
 - Fail a part or a line on purpose, while it runs, to see what the rest of the machine does: stuck contacts, burnt-out coils, broken wires, sensors reading
   zero, seized cylinders, stuck spools, burst lines and PLC inputs and outputs. It's marked on the drawing, counted in the status bar and listed in the report,
   which says it isn't a failure analysis.
+- Test scenarios: record what's done to a machine, say what should happen, and run it again after a change, in the window or with `fluidworx --test`. Saved in the study, as format 3.
 - A Program tab shows a PLC's program as it runs: rungs lit by real power flow, function blocks by their signals, charts by their active steps.
 - A roller, plunger or cam on a valve follows a cylinder, through its `Senses` property, or its tag: a valve `a1` is at the end of cylinder `A`'s stroke. So
   a pneumatic sequence runs with no electrics at all: see the new example.
